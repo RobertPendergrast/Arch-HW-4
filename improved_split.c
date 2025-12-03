@@ -29,10 +29,31 @@ void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int si
     }
 }
 
+void sort_three(uint32_t *arr) {
+    uint32_t temp = 0; 
+    if (arr[0] > arr[1]) {
+        temp = arr[0];
+        arr[0] = arr[1];
+        arr[1] = temp;
+    }
+    if (arr[2] < arr[1]) {
+        temp = arr[1];
+        arr[1] = arr[2];
+        arr[2] = temp;
+        if (arr[1] < arr[0]) {
+            temp = arr[0];
+            arr[0] = arr[1];
+            arr[1] = temp;
+        }
+    }
+}
+
 void sort_two(uint32_t *arr) {
     uint32_t temp = 0;
     if(arr[1] < arr[0]) {
-        
+        temp = arr[0];
+        arr[0] = arr[1];
+        arr[1] = temp;
     }
 }
 
