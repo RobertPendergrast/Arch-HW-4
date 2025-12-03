@@ -1,2 +1,0 @@
-merge.o: merge.c utils.h
-	cc merge.c -o merge.o
