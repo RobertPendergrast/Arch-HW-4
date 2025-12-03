@@ -13,8 +13,11 @@ merge.o: merge.c merge.h
 sorting: sorting.c utils.o
 	$(CC) $(CFLAGS) sorting.c utils.o -o sorting $(LDFLAGS)
 
-merge: merge.c utils.o
-	$(CC) $(CFLAGS) merge.c utils.o -o merge $(LDFLAGS)
+merge: merge.c
+	$(CC) $(CFLAGS) merge.c -o merge $(LDFLAGS)
+
+test_merge: test_merge.c merge.o utils.o
+	$(CC) $(CFLAGS) test_merge.c merge.o utils.o -o test_merge $(LDFLAGS)
 
 threaded_devide: sorting_threaded_devide.c utils.o merge.o
 	$(CC) $(CFLAGS) sorting_threaded_devide.c utils.o merge.o -o threaded_devide $(LDFLAGS)
