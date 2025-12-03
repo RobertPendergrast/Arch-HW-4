@@ -2,7 +2,8 @@
 #include <stdlib.h>
 #include <stdint.h> 
 #include <pthread.h>
-#include <utils.h>
+#include <string.h>
+#include "utils.h"
 
 // Avoid making changes to this function skeleton, apart from data type changes if required
 // In this starter code we have used uint32_t, feel free to change it to any other data type if required
@@ -10,7 +11,7 @@ void sort_array(uint32_t *arr, size_t size) {
 
 }
 
-void merge(int* left, int* right, int* arr, int size_left, int size_right) {
+void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
     int i = 0;
     // Merge the two arrays into arr
     while (i < size_left && i < size_right) {
@@ -32,7 +33,7 @@ void merge(int* left, int* right, int* arr, int size_left, int size_right) {
     }
 }
 
-void basic_merge_sort(int *arr, size_t size) {
+void basic_merge_sort(uint32_t *arr, size_t size) {
     // Basic Merge Sort Implementation
     if (size < 2) {
         return; // Nothing to sort
@@ -41,11 +42,11 @@ void basic_merge_sort(int *arr, size_t size) {
     int size_left = middle;
     int size_right = size - middle;
 
-    int* left = malloc(size_left * sizeof(int));
-    int* right = malloc(size_right * sizeof(int));
+    uint32_t* left = malloc(size_left * sizeof(uint32_t));
+    uint32_t* right = malloc(size_right * sizeof(uint32_t));
 
-    memcpy(left, arr, size_left * sizeof(int));
-    memcpy(right, arr + middle, size_right * sizeof(int));
+    memcpy(left, arr, size_left * sizeof(uint32_t));
+    memcpy(right, arr + middle, size_right * sizeof(uint32_t));
 
     basic_merge_sort(left, size_left);
     basic_merge_sort(right, size_right);
