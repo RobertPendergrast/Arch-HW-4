@@ -52,7 +52,8 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
 
     // Merge the two halves 
     merge(left, right, arr, size_left, size_right);
-
+    free(left);
+    free(right);
 }
 
 int main(int argc, char *argv[]) {
