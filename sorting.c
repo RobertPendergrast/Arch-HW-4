@@ -56,58 +56,35 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
 }
 
 int main(int argc, char *argv[]) {
-    // TODO: It would probably be better to read the array from a file instead of pass in as a command line argument
     if (argc < 3) {
         printf("Usage: %s input_file output_file\n", argv[0]);
         return 1; 
     }
 
-    //Size is the first 8 bytes of the input file
-    FILE *file = fopen(argv[1], "rb");
-    if (!file) {
-        printf("Error: Could not open file '%s'\n", argv[1]);
+    // Read array from input file
+    uint64_t size;
+    uint32_t *arr = read_array_from_file(argv[1], &size);
+    if (!arr) {
         return 1;
     }
-    uint32_t size;
-    fread(&size, sizeof(uint64_t), 1, file);
-    if (size == 0) {
-        printf("Error: Size is 0\n");
-        return 1;
-    }
-    uint32_t *arr = malloc(size * sizeof(uint32_t));
-    int read = fread(arr, sizeof(uint32_t), size, file);
-    if (read != size) {
-        printf("Error: Could not read array from file\n");
-        return 1;
-    }
-    fclose(file);
 
     basic_merge_sort(arr, size);
 
-    FILE *outfile = fopen(argv[2], "wb");
-    if (!outfile) {
-        printf("Error: Could not open output file '%s'\n", argv[2]);
+    // Verify the array is sorted
+    if (verify_sortedness(arr, size)) {
+        printf("Array sorted successfully!\n");
+    } else {
+        printf("Error: Array is not sorted correctly!\n");
         free(arr);
         return 1;
     }
-    // Write the size first (as uint64_t for compatibility with reading code)
-    uint64_t f_size = size;
-    if (fwrite(&f_size, sizeof(uint64_t), 1, outfile) != 1) {
-        printf("Error: Could not write size to output file\n");
-        fclose(outfile);
-        free(arr);
-        return 1;
-    }
-    // Write the sorted array
-    if (fwrite(arr, sizeof(uint32_t), size, outfile) != size) {
-        printf("Error: Could not write array to output file\n");
-        fclose(outfile);
-        free(arr);
-        return 1;
-    }
-    fclose(outfile);
 
-    // Free and return
+    // Write sorted array to output file
+    if (write_array_to_file(argv[2], arr, size) != 0) {
+        free(arr);
+        return 1;
+    }
+
     free(arr);
     return 0;
 }
