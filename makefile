@@ -10,16 +10,16 @@ utils.o: utils.c utils.h
 merge.o: merge.c merge.h
 	$(CC) $(CFLAGS) -c merge.c -o merge.o
 
-sorting: sorting.c utils.o utils.h
+sorting: sorting.c utils.o
 	$(CC) $(CFLAGS) sorting.c utils.o -o sorting $(LDFLAGS)
 
-merge: merge.c utils.o utils.h
+merge: merge.c utils.o
 	$(CC) $(CFLAGS) merge.c utils.o -o merge $(LDFLAGS)
 
-threaded_devide: sorting_threaded_devide.c utils.o merge.o utils.h 
+threaded_devide: sorting_threaded_devide.c utils.o merge.o
 	$(CC) $(CFLAGS) sorting_threaded_devide.c utils.o merge.o -o threaded_devide $(LDFLAGS)
 
-improved_split: improved_split.c utils.o utils.h
+improved_split: improved_split.c utils.o
 	$(CC) $(CFLAGS) improved_split.c utils.o -o improved_split $(LDFLAGS)
 
 clean:
