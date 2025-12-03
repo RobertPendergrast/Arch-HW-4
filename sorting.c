@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h> 
 #include <pthread.h>
+#include <utils.h>
 
 // Avoid making changes to this function skeleton, apart from data type changes if required
 // In this starter code we have used uint32_t, feel free to change it to any other data type if required
@@ -9,17 +10,48 @@ void sort_array(uint32_t *arr, size_t size) {
 
 }
 
-void baseline_sort_array(uint32_t *arr, size_t size) {
+void merge(int* left, int* right, int* arr, int size_left, int size_right) {
+    int i = 0;
+    // Merge the two arrays into arr
+    while (i < size_left && i < size_right) {
+        if (left[i] <= right[i]) {
+            arr[i] = left[i];
+        } else {
+            arr[i] = right[i];
+        }
+        i++;
+    }
+    // Merge the rest in
+    while (i < size_left) {
+        arr[i] = left[i];
+        i++;
+    }
+    while (i< size_right) {
+        arr[i] = right[i];
+        i++;
+    }
+}
+
+void basic_merge_sort(int *arr, size_t size) {
     // Basic Merge Sort Implementation
     if (size < 2) {
         return; // Nothing to sort
     }
     int middle = size / 2;
-    baseline_sort_array(arr, middle);
-    baseline_sort_array(arr + middle, size - middle);
+    int size_left = middle;
+    int size_right = size - middle;
 
-    // Merge the two halves (This can definitely be optimized!)
-    merge();
+    int* left = malloc(size_left * sizeof(int));
+    int* right = malloc(size_right * sizeof(int));
+
+    memcpy(left, arr, size_left * sizeof(int));
+    memcpy(right, arr + middle, size_right * sizeof(int));
+
+    basic_merge_sort(left, size_left);
+    basic_merge_sort(right, size_right);
+
+    // Merge the two halves 
+    merge(left, right, arr, size_left, size_right);
 }
 
 int main(int argc, char *argv[]) {
@@ -40,7 +72,7 @@ int main(int argc, char *argv[]) {
         sort_array(sorted_arr, size);
     } else {
         printf("Basic Sorting Selected\n");
-        baseline_sort_array(sorted_arr, size);
+        basic_merge_sort(sorted_arr, size);
     }
 
     // Print the sorted array

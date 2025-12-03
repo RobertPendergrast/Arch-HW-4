@@ -1,0 +1,1 @@
+void print_array(u_int32_t *arr, size_t size);
