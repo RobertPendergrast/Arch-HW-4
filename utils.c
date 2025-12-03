@@ -77,7 +77,6 @@ void print_array(uint32_t *arr, uint64_t size) {
     printf("\n");
 }
 
-
 int verify_sortedness(uint32_t *arr, uint64_t size) {
     for (uint64_t i = 1; i < size; i++) {
         if (arr[i] < arr[i - 1]) {
