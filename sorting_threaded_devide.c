@@ -9,27 +9,7 @@
 #define MAX_DEPTH 5  // Limit parallel depth to avoid too many threads
 
 
-void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
-    int i = 0;
-    // Merge the two arrays into arr
-    while (i < size_left && i < size_right) {
-        if (left[i] <= right[i]) {
-            arr[i] = left[i];
-        } else {
-            arr[i] = right[i];
-        }
-        i++;
-    }
-    // Merge the rest in
-    while (i < size_left) {
-        arr[i] = left[i];
-        i++;
-    }
-    while (i< size_right) {
-        arr[i] = right[i];
-        i++;
-    }
-}
+
 struct thread_args {
     uint32_t *arr;
     size_t size;
@@ -72,10 +52,10 @@ void threaded_devide_merge_sort(uint32_t *arr, size_t size, int depth) {
         threaded_devide_merge_sort(left, size_left, depth + 1);
         threaded_devide_merge_sort(right, size_right, depth + 1);
     }
+    // Merge the two halves 
+    merge_arrays(left, size_left, right, size_right, arr);
     free(left);
     free(right);
-    // Merge the two halves 
-    merge(left, right, arr, size_left, size_right);
 }
 
 void* threaded_devide_merge_sort_thread(void* arg) {

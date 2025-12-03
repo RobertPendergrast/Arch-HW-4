@@ -1,8 +1,4 @@
-#include <stdint.h> 
-#include <stdlib.h> 
-#include <stdio.h>
-
-#include "utils.h"
+#include "merge.h"
 
 void merge_arrays(
     uint32_t *arr_left,
@@ -11,7 +7,7 @@ void merge_arrays(
     size_t size_right,
     uint32_t *merged_arr
 ) {
-    int i, j, k = 0;
+    int i = 0, j = 0, k = 0;
     // Merge the two arrays into arr
     while (i < size_left && i < size_right) {
         if (arr_left[j] <= arr_right[k]) {
@@ -34,19 +30,3 @@ void merge_arrays(
     }
 }
 
-
-int main(int argc, char *argv[]) {
-    uint32_t test_arr_1[] = {1, 5, 8, 2};
-    size_t size_1 = sizeof(test_arr_1);
-    uint32_t test_arr_2[] = {4, 7, 3, 6};
-    size_t size_2 = sizeof(test_arr_2);
-    uint32_t* arr = malloc((size_1) + (size_2) * sizeof(uint32_t));
-    merge_arrays(
-        test_arr_1,
-        size_1,
-        test_arr_2,
-        size_2,
-        arr
-    );
-    print_array(arr, size_1 + size_2);
-}
