@@ -8,8 +8,6 @@
 #include "merge.h"
 #define MAX_DEPTH 5  // Limit parallel depth to avoid too many threads
 
-
-
 struct thread_args {
     uint32_t *arr;
     size_t size;

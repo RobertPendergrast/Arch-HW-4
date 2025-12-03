@@ -12,26 +12,23 @@ void sort_array(uint32_t *arr, size_t size) {
 }
 
 void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
-    int i, j, k = 0;
+    int i = 0;
+    int j = 0;
+    int k = 0;
     // Merge the two arrays into arr
-    while (i < size_left && i < size_right) {
-        if (left[j] <= right[k]) {
-            arr[i] = left[j];
-            j++;
+    while (i < size_left && j < size_right) {
+        if (left[i] <= right[j]) {
+            arr[k++] = left[i++];
         } else {
-            arr[i] = right[k];
-            k++;
+            arr[k++] = right[j++];
         }
-        i++;
     }
     // Merge the rest in
     while (i < size_left) {
-        arr[i] = left[i];
-        i++;
+        arr[k++] = left[i++];
     }
-    while (i< size_right) {
-        arr[i] = right[i];
-        i++;
+    while (j< size_right) {
+        arr[k++] = right[j++];
     }
 }
 
@@ -55,22 +52,22 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
 
     // Merge the two halves 
     merge(left, right, arr, size_left, size_right);
+
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        printf("Usage: %s input_file output_file\n", argv[0]);
-        return 1; 
-    }
-
     // Read array from input file
     uint64_t size;
-    uint32_t *arr = read_array_from_file(argv[1], &size);
+    //uint32_t *arr = read_array_from_file(argv[1], &size);
+    uint32_t arr[] = {5,6,2,234,54,6,21,1,23,5,456,46,6,1,5,7,8,9,5,65,34,23,23,13};
+    size = sizeof(arr) / sizeof(arr[0]);
     if (!arr) {
         return 1;
     }
 
     basic_merge_sort(arr, size);
+
+    print_array(arr,size);
 
     // Verify the array is sorted
     if (verify_sortedness(arr, size)) {
