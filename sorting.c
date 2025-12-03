@@ -58,34 +58,36 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
 }
 
 int main(int argc, char *argv[]) {
-    // TODO: It would probably be better to read the array from a file instead of pass in as a command line argument
     if (argc < 3) {
-        printf("Usage: %s <size_of_array> <array_elements>\n", argv[0]);
+        printf("Usage: %s input_file output_file\n", argv[0]);
         return 1; 
     }
 
-    //Initialise the array
-    int size = atoi(argv[1]);
+    // Read array from input file
+    uint64_t size;
+    uint32_t *arr = read_array_from_file(argv[1], &size);
+    if (!arr) {
+        return 1;
+    }
 
-    uint32_t *sorted_arr = malloc(size * sizeof(uint32_t)); // Allocate memory for the sorted array
+    basic_merge_sort(arr, size);
 
-     // Sort the copied array
-    if (strcmp(argv[3], "-o")== 0){
-        printf("Optimized Sorting Selected\n");
-        sort_array(sorted_arr, size);
+    // Verify the array is sorted
+    if (verify_sortedness(arr, size)) {
+        printf("Array sorted successfully!\n");
     } else {
-        printf("Basic Sorting Selected\n");
-        basic_merge_sort(sorted_arr, size);
+        printf("Error: Array is not sorted correctly!\n");
+        free(arr);
+        return 1;
     }
 
-    // Print the sorted array
-    for (int i = 0; i < size; i++) {
-        printf("%d", sorted_arr[i]);
+    // Write sorted array to output file
+    if (write_array_to_file(argv[2], arr, size) != 0) {
+        free(arr);
+        return 1;
     }
-    printf("\n");
 
-    // Free and return
-    free(sorted_arr);
+    free(arr);
     return 0;
 }
 
