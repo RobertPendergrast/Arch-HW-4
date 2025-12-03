@@ -58,32 +58,57 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
 int main(int argc, char *argv[]) {
     // TODO: It would probably be better to read the array from a file instead of pass in as a command line argument
     if (argc < 3) {
-        printf("Usage: %s <size_of_array> <array_elements>\n", argv[0]);
+        printf("Usage: %s input_file output_file\n", argv[0]);
         return 1; 
     }
 
-    //Initialise the array
-    int size = atoi(argv[1]);
-
-    uint32_t *sorted_arr = malloc(size * sizeof(uint32_t)); // Allocate memory for the sorted array
-
-     // Sort the copied array
-    if (strcmp(argv[3], "-o")== 0){
-        printf("Optimized Sorting Selected\n");
-        sort_array(sorted_arr, size);
-    } else {
-        printf("Basic Sorting Selected\n");
-        basic_merge_sort(sorted_arr, size);
+    //Size is the first 8 bytes of the input file
+    FILE *file = fopen(argv[1], "rb");
+    if (!file) {
+        printf("Error: Could not open file '%s'\n", argv[1]);
+        return 1;
     }
-
-    // Print the sorted array
-    for (int i = 0; i < size; i++) {
-        printf("%d", sorted_arr[i]);
+    uint32_t size;
+    fread(&size, sizeof(uint64_t), 1, file);
+    if (size == 0) {
+        printf("Error: Size is 0\n");
+        return 1;
     }
-    printf("\n");
+    uint32_t *arr = malloc(size * sizeof(uint32_t));
+    int read = fread(arr, sizeof(uint32_t), size, file);
+    if (read != size) {
+        printf("Error: Could not read array from file\n");
+        return 1;
+    }
+    fclose(file);
+
+    basic_merge_sort(arr, size);
+
+    FILE *outfile = fopen(argv[2], "wb");
+    if (!outfile) {
+        printf("Error: Could not open output file '%s'\n", argv[2]);
+        free(arr);
+        return 1;
+    }
+    // Write the size first (as uint64_t for compatibility with reading code)
+    uint64_t f_size = size;
+    if (fwrite(&f_size, sizeof(uint64_t), 1, outfile) != 1) {
+        printf("Error: Could not write size to output file\n");
+        fclose(outfile);
+        free(arr);
+        return 1;
+    }
+    // Write the sorted array
+    if (fwrite(arr, sizeof(uint32_t), size, outfile) != size) {
+        printf("Error: Could not write array to output file\n");
+        fclose(outfile);
+        free(arr);
+        return 1;
+    }
+    fclose(outfile);
 
     // Free and return
-    free(sorted_arr);
+    free(arr);
     return 0;
 }
 
