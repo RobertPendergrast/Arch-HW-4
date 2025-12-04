@@ -1,32 +1,27 @@
 #include "merge.h"
 
 void merge_arrays(
-    uint32_t *arr_left,
+    uint32_t *left,
     size_t size_left,
-    uint32_t *arr_right,
+    uint32_t *right,
     size_t size_right,
-    uint32_t *merged_arr
+    uint32_t *arr
 ) {
     int i = 0, j = 0, k = 0;
     // Merge the two arrays into arr
-    while (i < size_left && i < size_right) {
-        if (arr_left[j] <= arr_right[k]) {
-            merged_arr[i] = arr_left[j];
-            j++;
+    while (i < size_left && j < size_right) {
+        if (left[i] <= right[j]) {
+            arr[k++] = left[i++];
         } else {
-            merged_arr[i] = arr_right[k];
-            k++;
+            arr[k++] = right[j++];
         }
-        i++;
     }
     // Merge the rest in
     while (i < size_left) {
-        merged_arr[i] = arr_left[i];
-        i++;
+        arr[k++] = left[i++];
     }
-    while (i < size_right) {
-        merged_arr[i] = arr_right[i];
-        i++;
+    while (j< size_right) {
+        arr[k++] = right[j++];
     }
 }
 
