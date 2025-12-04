@@ -5,17 +5,11 @@
 #include "utils.h"
 
 int main(int argc, char *argv[]) {
-    uint32_t test_arr_1[] = {1, 2, 5, 8};
-    size_t size_1 = sizeof(test_arr_1) / sizeof(uint32_t);
-    uint32_t test_arr_2[] = {3, 4, 6, 7, 9};
-    size_t size_2 = sizeof(test_arr_2) / sizeof(uint32_t);
-    uint32_t* arr = malloc((size_1 + size_2) * sizeof(uint32_t));
-    merge_arrays(
-        test_arr_1,
-        size_1,
-        test_arr_2,
-        size_2,
-        arr
-    );
-    print_array(arr, size_1 + size_2);
+    uint32_t left[] = {1, 2, 5, 8};
+    // size_t size_left = sizeof(left) / sizeof(uint32_t);
+    uint32_t right[] = {3, 4, 6, 7, 9};
+    // size_t size_right = sizeof(right) / sizeof(uint32_t);
+     __m128i left_reg = _mm_loadu_si128((__m128i*) left);
+     __m128i right_reg = _mm_loadu_si128((__m128i*) right);
+    merge_128_registers(left_reg, right_reg);
 }
