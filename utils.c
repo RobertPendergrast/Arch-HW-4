@@ -1,5 +1,6 @@
 #include "utils.h"
-#include "utils.h"
+
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -86,4 +87,30 @@ int verify_sortedness(uint32_t *arr, uint64_t size) {
         }
     }
     return 1;
+}
+
+/*
+ * Creates an 4 long array of integers and copies the m128i register into them
+ * before printing the values out.
+ */
+void print_128_num(__m128i var)
+{
+    uint32_t val[4];
+    memcpy(val, &var, sizeof(val));
+    printf("Numerical: %i %i %i %i \n", 
+           val[0], val[1], val[2], val[3]);
+}
+
+/*
+ * Creates an 16 long array of integers and copies the m512i register into them
+ * before printing the values out.
+ */
+void print_512_num(__m512i var)
+{
+    uint32_t val[16];
+    memcpy(val, &var, sizeof(val));
+    printf("Numerical: %i %i %i %i %i %i %i %i %i %i %i %i %i %i %i %i \n", 
+        val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+        val[8], val[9], val[10], val[11], val[12], val[13], val[14], val[15]
+    );
 }

@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -O2 -mavx512f
 LDFLAGS = -pthread
 
 all: sorting merge threaded_devide improved_split
@@ -27,3 +27,7 @@ improved_split: improved_split.c utils.o
 
 clean:
 	rm -f utils.o merge.o sorting merge threaded_devide improved_split
+
+github:
+	-git commit -a
+	git push origin master

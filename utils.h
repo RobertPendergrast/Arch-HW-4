@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <immintrin.h>
+
 // Read an array from a binary file
 // File format: first 8 bytes = size (uint64_t), followed by size * uint32_t elements
 // Returns a malloc'd array, caller must free
@@ -22,4 +24,9 @@ void print_array(uint32_t *arr, uint64_t size);
 // Returns 1 if sorted, 0 if not sorted
 int verify_sortedness(uint32_t *arr, uint64_t size);
 
+// Prints out the values in an mm128i register
+void print_128_num(__m128i var);
+
+// Prints out the values in an mm512i register
+void print_512_num(__m512i var);
 #endif
