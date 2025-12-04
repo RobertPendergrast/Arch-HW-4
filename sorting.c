@@ -3,6 +3,7 @@
 #include <stdint.h> 
 #include <pthread.h>
 #include <string.h>
+#include <time.h>
 #include "utils.h"
 
 // Avoid making changes to this function skeleton, apart from data type changes if required
@@ -71,7 +72,14 @@ int main(int argc, char *argv[]) {
 
     printf("Read %lu elements from %s\n", size, argv[1]);
 
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     basic_merge_sort(arr, size);
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    printf("Sorting took %.3f seconds\n", elapsed);
 
     // Only print array if small enough
     if (size <= 10) {
