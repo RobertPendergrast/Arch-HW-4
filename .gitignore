@@ -1,4 +1,32 @@
+# Compiled binaries
 utils
 merge
 threaded_devide
+sorting
+test_merge
 *.o
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+
+# Generated datasets (too large for git)
+datasets/
+*.bin
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
