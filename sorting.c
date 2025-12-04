@@ -73,7 +73,10 @@ int main(int argc, char *argv[]) {
 
     basic_merge_sort(arr, size);
 
-    print_array(arr,size);
+    // Only print array if small enough
+    if (size <= 10) {
+        print_array(arr, size);
+    }
 
     // Verify the array is sorted
     if (verify_sortedness(arr, size)) {
