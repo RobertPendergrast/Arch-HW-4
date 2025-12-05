@@ -11,5 +11,15 @@ int main(int argc, char *argv[]) {
     // size_t size_right = sizeof(right) / sizeof(uint32_t);
      __m128i left_reg = _mm_loadu_si128((__m128i*) left);
      __m128i right_reg = _mm_loadu_si128((__m128i*) right);
+    printf("Before: \n");
+    printf("Left: \n");
+    print_128_num(left_reg);
+    printf("Right: \n");
+    print_128_num(right_reg);
     merge_128_registers(left_reg, right_reg);
+    printf("After: \n");
+    printf("Left: \n");
+    print_128_num(left_reg);
+    printf("Right: \n");
+    print_128_num(right_reg);
 }

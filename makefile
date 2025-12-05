@@ -19,6 +19,9 @@ merge: merge.c
 test_merge: test_merge.c merge.o utils.o
 	$(CC) $(CFLAGS) test_merge.c merge.o utils.o -o test_merge $(LDFLAGS)
 
+test_merge_run: test_merge
+	./test_merge
+
 threaded_devide: sorting_threaded_devide.c utils.o merge.o
 	$(CC) $(CFLAGS) sorting_threaded_devide.c utils.o merge.o -o threaded_devide $(LDFLAGS)
 
