@@ -25,8 +25,11 @@ threaded_devide: sorting_threaded_devide.c utils.o merge.o
 improved_split: improved_split.c utils.o
 	$(CC) $(CFLAGS) improved_split.c utils.o -o improved_split $(LDFLAGS)
 
+optimized: optimized.c 
+	$(CC) $(CFLAGS) optimized.c -o optimized $(LDFLAGS)
+
 clean:
-	rm -f utils.o merge.o sorting merge threaded_devide improved_split
+	rm -f utils.o merge.o sorting merge threaded_devide improved_split optimized
 
 github:
 	-git commit -a
