@@ -2,8 +2,6 @@ CC = gcc
 CFLAGS = -Wall -O2 -mavx512f
 LDFLAGS = -pthread
 
-all: sorting merge threaded_devide improved_split
-
 utils.o: utils.c utils.h
 	$(CC) $(CFLAGS) -c utils.c -o utils.o
 
@@ -25,8 +23,11 @@ threaded_devide: sorting_threaded_devide.c utils.o merge.o
 improved_split: improved_split.c utils.o
 	$(CC) $(CFLAGS) improved_split.c utils.o -o improved_split $(LDFLAGS)
 
+multi_sort: multi_sort.c utils.o
+	$(CC) $(CFLAGS_OPT) multi_sort.c utils.o -o multi_sort $(LDFLAGS)
+
 clean:
-	rm -f utils.o merge.o sorting merge threaded_devide improved_split
+	rm -f utils.o merge.o sorting merge threaded_devide improved_split multi_sort
 
 github:
 	-git commit -a
