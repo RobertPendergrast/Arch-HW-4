@@ -19,16 +19,16 @@ const int SHUFFLE_3_H = 0b01110010;
  * Takes in two m128i registers and merges them in place.
  */
 void merge_128_registers(
-    __m128i left,
-    __m128i right
+    __m128i *left,
+    __m128i *right
 ) {
-    // Reverse the right register
-    right = _mm_shuffle_epi32(right, REV_CNTRL);
+    // Reverse the *right register
+    *right = _mm_shuffle_epi32(*right, REV_CNTRL);
 
     // Level 1
     // Get min/max values
-    __m128i L1 = _mm_min_epi32(left, right);
-    __m128i H1 = _mm_max_epi32(left, right);
+    __m128i L1 = _mm_min_epi32(*left, *right);
+    __m128i H1 = _mm_max_epi32(*left, *right);
 
     // Shuffle 1
     __m128i L1p = _mm_blend_epi32(L1, H1, BLEND_1);
@@ -59,17 +59,17 @@ void merge_128_registers(
 
     // Reset
     // Note: This will eventually be removed by consolidating registers
-    left = L3p;
-    right = H3p;
+    *left = L3p;
+    *right = H3p;
 }
 
 /*
  * Takes in two m512i registers and merges them in place.
  */
 void merge_512_registers(
-    __m512i left,
-    __m512i right
+    __m512i *left,
+    __m512i *right
 ) {
-    print_512_num(left);
-    print_512_num(right);
+    *right = _mm512_shuffle_epi32(*right, REV_CNTRL);
+    print_512_num(*right);
 }
