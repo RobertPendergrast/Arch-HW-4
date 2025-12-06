@@ -6,18 +6,31 @@
 #include <time.h>
 #include "utils.h"
 
-// Configuration
+// L3 cache is 66MB (i think), so 8 threads with 8MB each maximizes cache locality
 #define NUM_THREADS 8
-#define CHUNK_8MB   (8 * 1024 * 1024 / sizeof(uint32_t))   // 2M elements
-#define CHUNK_64MB  (64 * 1024 * 1024 / sizeof(uint32_t))  // 16M elements
+#define CACHE_SIZE_MB 64
+#define CHUNK_SIZE (CACHE_SIZE_MB / NUM_THREADS * 1024 * 1024 / sizeof(uint32_t))
 
-static int g_k_value = 8;  // Default K for k-way merge
+// Helper to compute elapsed time in seconds
+static double elapsed_sec(struct timespec start, struct timespec end) {
+    return (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+}
 
-// ============================================================================
-// Basic Merge Sort (used by each thread)
-// ============================================================================
+// Thread task structs
+typedef struct {
+    uint32_t *arr;
+    size_t start;
+    size_t end;
+} SortTask;
 
-void merge(uint32_t *arr, uint32_t *tmp, size_t left, size_t mid, size_t right) {
+typedef struct {
+    uint32_t *arr;
+    uint32_t *tmp;
+    size_t left, mid, right;
+} MergeTask;
+
+// Merge two sorted subarrays [left..mid) and [mid..right) into one
+static void merge(uint32_t *arr, uint32_t *tmp, size_t left, size_t mid, size_t right) {
     size_t i = left, j = mid, k = 0;
     
     while (i < mid && j < right) {
@@ -33,7 +46,8 @@ void merge(uint32_t *arr, uint32_t *tmp, size_t left, size_t mid, size_t right) 
     memcpy(&arr[left], tmp, (right - left) * sizeof(uint32_t));
 }
 
-void merge_sort(uint32_t *arr, uint32_t *tmp, size_t left, size_t right) {
+// Recursive merge sort used by each thread to sort its chunk
+static void merge_sort(uint32_t *arr, uint32_t *tmp, size_t left, size_t right) {
     if (right - left < 2) return;
     
     size_t mid = left + (right - left) / 2;
@@ -42,17 +56,8 @@ void merge_sort(uint32_t *arr, uint32_t *tmp, size_t left, size_t right) {
     merge(arr, tmp, left, mid, right);
 }
 
-// ============================================================================
-// Phase 1: Parallel Sort of 8MB Chunks
-// ============================================================================
-
-typedef struct {
-    uint32_t *arr;
-    size_t start;
-    size_t end;
-} SortTask;
-
-void *sort_chunk_thread(void *arg) {
+// Thread entry point for Phase 1: sort a single chunk
+static void *sort_thread_fn(void *arg) {
     SortTask *task = (SortTask *)arg;
     size_t size = task->end - task->start;
     
@@ -64,234 +69,128 @@ void *sort_chunk_thread(void *arg) {
     return NULL;
 }
 
-double phase1_parallel_sort(uint32_t *arr, size_t n) {
-    size_t num_chunks = (n + CHUNK_8MB - 1) / CHUNK_8MB;
-    
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    
-    // Process chunks in batches of NUM_THREADS
-    for (size_t batch = 0; batch < num_chunks; batch += NUM_THREADS) {
-        pthread_t threads[NUM_THREADS];
-        SortTask tasks[NUM_THREADS];
-        int count = 0;
-        
-        for (int i = 0; i < NUM_THREADS && (batch + i) < num_chunks; i++) {
-            size_t idx = batch + i;
-            tasks[count].arr = arr;
-            tasks[count].start = idx * CHUNK_8MB;
-            tasks[count].end = (idx + 1) * CHUNK_8MB;
-            if (tasks[count].end > n) tasks[count].end = n;
-            
-            pthread_create(&threads[count], NULL, sort_chunk_thread, &tasks[count]);
-            count++;
-        }
-        
-        for (int i = 0; i < count; i++) {
-            pthread_join(threads[i], NULL);
-        }
-    }
-    
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Phase 1: Sorted %zu chunks (8MB each) in %.3fs\n", num_chunks, elapsed);
-    return elapsed;
-}
-
-// ============================================================================
-// Phase 2: Hierarchical Merge (8MB -> 16MB -> 32MB -> 64MB)
-// ============================================================================
-
-typedef struct {
-    uint32_t *arr;
-    uint32_t *tmp;
-    size_t left, mid, right;
-} MergeTask;
-
-void *merge_chunk_thread(void *arg) {
+// Thread entry point for Phase 2: merge two adjacent sorted regions
+static void *merge_thread_fn(void *arg) {
     MergeTask *task = (MergeTask *)arg;
     merge(task->arr, task->tmp, task->left, task->mid, task->right);
     return NULL;
 }
 
-double phase2_hierarchical_merge(uint32_t *arr, size_t n) {
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
+// Phase 1: Sort all chunks in parallel (8 threads at a time)
+static size_t parallel_sort_chunks(uint32_t *arr, size_t n) {
+    size_t num_chunks = (n + CHUNK_SIZE - 1) / CHUNK_SIZE;
     
-    // Double chunk size each iteration: 8MB -> 16MB -> 32MB -> 64MB
-    for (size_t chunk_size = CHUNK_8MB; chunk_size < CHUNK_64MB && chunk_size < n; chunk_size *= 2) {
-        size_t num_merges = (n + chunk_size * 2 - 1) / (chunk_size * 2);
+    for (size_t batch = 0; batch < num_chunks; batch += NUM_THREADS) {
+        pthread_t threads[NUM_THREADS];
+        SortTask tasks[NUM_THREADS];
+        int active = 0;
         
-        for (size_t batch = 0; batch < num_merges; batch += NUM_THREADS) {
+        for (int t = 0; t < NUM_THREADS && (batch + t) < num_chunks; t++) {
+            size_t idx = batch + t;
+            tasks[active].arr = arr;
+            tasks[active].start = idx * CHUNK_SIZE;
+            tasks[active].end = (idx + 1) * CHUNK_SIZE;
+            if (tasks[active].end > n) tasks[active].end = n;
+            
+            pthread_create(&threads[active], NULL, sort_thread_fn, &tasks[active]);
+            active++;
+        }
+        
+        for (int t = 0; t < active; t++) {
+            pthread_join(threads[t], NULL);
+        }
+    }
+    
+    return num_chunks;
+}
+
+// Hierarchical merge with thread halving
+// When num_chunks is odd, the last chunk is left alone (already sorted)
+// and gets merged in the next level
+static void parallel_merge_recursive(uint32_t *arr, size_t n, size_t num_chunks) {
+    size_t chunk_size = CHUNK_SIZE;
+    
+    while (num_chunks > 1) {
+        size_t num_merges = num_chunks / 2;
+        
+        //Reduce threads to use as needed
+        int threads_to_use = (num_merges < NUM_THREADS) ? (int)num_merges : NUM_THREADS;
+        
+        printf("%3zu chunks -> %3zu chunks | Merges: %3zu | Threads: %d\n", 
+               num_chunks, (num_chunks + 1) / 2, num_merges, threads_to_use);
+        
+        for (size_t batch = 0; batch < num_merges; batch += threads_to_use) {
             pthread_t threads[NUM_THREADS];
             MergeTask tasks[NUM_THREADS];
             uint32_t *tmps[NUM_THREADS];
-            int count = 0;
+            int active = 0;
             
-            for (int i = 0; i < NUM_THREADS && (batch + i) < num_merges; i++) {
-                size_t left = (batch + i) * chunk_size * 2;
+            for (int t = 0; t < threads_to_use && (batch + t) < num_merges; t++) {
+                size_t merge_idx = batch + t;
+                size_t left = merge_idx * chunk_size * 2;
                 size_t mid = left + chunk_size;
                 size_t right = mid + chunk_size;
                 
+                // Skip if out of bounds
                 if (mid >= n) continue;
                 if (right > n) right = n;
                 
-                tmps[count] = malloc((right - left) * sizeof(uint32_t));
-                tasks[count].arr = arr;
-                tasks[count].tmp = tmps[count];
-                tasks[count].left = left;
-                tasks[count].mid = mid;
-                tasks[count].right = right;
+                // Allocate temp buffer for this merge
+                tmps[active] = malloc((right - left) * sizeof(uint32_t));
+                tasks[active].arr = arr;
+                tasks[active].tmp = tmps[active];
+                tasks[active].left = left;
+                tasks[active].mid = mid;
+                tasks[active].right = right;
                 
-                pthread_create(&threads[count], NULL, merge_chunk_thread, &tasks[count]);
-                count++;
+                pthread_create(&threads[active], NULL, merge_thread_fn, &tasks[active]);
+                active++;
             }
             
-            for (int i = 0; i < count; i++) {
-                pthread_join(threads[i], NULL);
-                free(tmps[i]);
+            for (int t = 0; t < active; t++) {
+                pthread_join(threads[t], NULL);
+                free(tmps[t]);
             }
         }
-    }
-    
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Phase 2: Hierarchical merge to 64MB in %.3fs\n", elapsed);
-    return elapsed;
-}
-
-// ============================================================================
-// Phase 3: K-Way Merge using Min-Heap
-// ============================================================================
-
-typedef struct {
-    uint32_t value;
-    size_t chunk_id;
-} HeapNode;
-
-void heap_sift_down(HeapNode *heap, size_t idx, size_t heap_size) {
-    while (1) {
-        size_t smallest = idx;
-        size_t left = 2 * idx + 1;
-        size_t right = 2 * idx + 2;
         
-        if (left < heap_size && heap[left].value < heap[smallest].value)
-            smallest = left;
-        if (right < heap_size && heap[right].value < heap[smallest].value)
-            smallest = right;
-        
-        if (smallest == idx) break;
-        
-        HeapNode tmp = heap[idx];
-        heap[idx] = heap[smallest];
-        heap[smallest] = tmp;
-        idx = smallest;
+        chunk_size *= 2;
+        num_chunks = (num_chunks + 1) / 2;
     }
 }
-
-double phase3_kway_merge(uint32_t *arr, size_t n, int k) {
-    size_t num_chunks = (n + CHUNK_64MB - 1) / CHUNK_64MB;
-    
-    if (num_chunks <= 1) {
-        printf("Phase 3: Single chunk, no merge needed\n");
-        return 0;
-    }
-    
-    if ((size_t)k > num_chunks) k = num_chunks;
-    
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    
-    // Allocate output and tracking arrays
-    uint32_t *output = malloc(n * sizeof(uint32_t));
-    size_t *positions = malloc(num_chunks * sizeof(size_t));
-    size_t *ends = malloc(num_chunks * sizeof(size_t));
-    HeapNode *heap = malloc(num_chunks * sizeof(HeapNode));
-    
-    // Initialize chunk boundaries
-    for (size_t i = 0; i < num_chunks; i++) {
-        positions[i] = i * CHUNK_64MB;
-        ends[i] = (i + 1) * CHUNK_64MB;
-        if (ends[i] > n) ends[i] = n;
-    }
-    
-    // Build initial heap with first element from each chunk
-    size_t heap_size = 0;
-    for (size_t i = 0; i < num_chunks; i++) {
-        heap[heap_size].value = arr[positions[i]++];
-        heap[heap_size].chunk_id = i;
-        heap_size++;
-    }
-    
-    // Heapify
-    for (int i = heap_size / 2 - 1; i >= 0; i--) {
-        heap_sift_down(heap, i, heap_size);
-    }
-    
-    // Extract minimum and refill from same chunk
-    size_t out_idx = 0;
-    while (heap_size > 0) {
-        output[out_idx++] = heap[0].value;
-        size_t chunk_id = heap[0].chunk_id;
-        
-        if (positions[chunk_id] < ends[chunk_id]) {
-            // Refill from same chunk
-            heap[0].value = arr[positions[chunk_id]++];
-            heap_sift_down(heap, 0, heap_size);
-        } else {
-            // Chunk exhausted, remove from heap
-            heap[0] = heap[--heap_size];
-            if (heap_size > 0) {
-                heap_sift_down(heap, 0, heap_size);
-            }
-        }
-    }
-    
-    // Copy result back
-    memcpy(arr, output, n * sizeof(uint32_t));
-    
-    free(output);
-    free(positions);
-    free(ends);
-    free(heap);
-    
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Phase 3: %d-way merge of %zu chunks in %.3fs\n", k, num_chunks, elapsed);
-    return elapsed;
-}
-
-// ============================================================================
-// Main Entry Point
-// ============================================================================
 
 void sort_array(uint32_t *arr, size_t n) {
-    printf("\n=== Three-Phase Parallel Merge Sort ===\n");
-    printf("Elements: %zu (%.2f GB), Threads: %d, K: %d\n\n", 
-           n, n * 4.0 / 1024 / 1024 / 1024, NUM_THREADS, g_k_value);
+    struct timespec start1, end1, start2, end2;
+
+    // Phase 1: Sort chunks
+    printf("Starting thread level sort...\n");
+    clock_gettime(CLOCK_MONOTONIC, &start1);
+    size_t num_chunks = parallel_sort_chunks(arr, n);
+    clock_gettime(CLOCK_MONOTONIC, &end1);
+    double t1 = elapsed_sec(start1, end1);
+    printf("%zu chunks sorted in %.3fs\n\n", num_chunks, t1);
     
-    double t1 = phase1_parallel_sort(arr, n);
-    double t2 = phase2_hierarchical_merge(arr, n);
-    double t3 = phase3_kway_merge(arr, n, g_k_value);
-    
-    double total = t1 + t2 + t3;
-    printf("\n=== Total: %.3fs (%.2f M elem/s) ===\n", total, n / total / 1e6);
+    // Phase 2: Merge chunks
+    printf("Starting recursive merge...\n");
+    clock_gettime(CLOCK_MONOTONIC, &start2);
+    parallel_merge_recursive(arr, n, num_chunks);
+    clock_gettime(CLOCK_MONOTONIC, &end2);
+    double t2 = elapsed_sec(start2, end2);
+    printf("Merges completed in %.3fs\n\n", t2);
+
+    printf("Total time: %.3fs\n", t1 + t2);
 }
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Usage: %s <input_file> [output_file] [k_value]\n", argv[0]);
+        printf("Usage: %s <input_file>\n", argv[0]);
         return 1;
     }
-
-    if (argc >= 4) g_k_value = atoi(argv[3]);
-    if (g_k_value < 2) g_k_value = 8;
 
     uint64_t size;
     uint32_t *arr = read_array_from_file(argv[1], &size);
     if (!arr) return 1;
 
-    printf("Read %lu elements from %s\n", size, argv[1]);
+    printf("Read %lu elements from %s\n\n", size, argv[1]);
     
     sort_array(arr, size);
 
