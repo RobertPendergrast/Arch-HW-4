@@ -30,7 +30,7 @@ void merge_128_registers(
     __m128i L1 = _mm_min_epi32(*left, *right);
     __m128i H1 = _mm_max_epi32(*left, *right);
 
-    // Shuffle 1
+    // Shuffle
     __m128i L1p = _mm_blend_epi32(L1, H1, _128_BLEND_1);
     __m128i H1p = _mm_blend_epi32(H1, L1, _128_BLEND_1);
     H1p = _mm_shuffle_epi32(H1p, _128_SHUFFLE_1);
@@ -40,7 +40,7 @@ void merge_128_registers(
     __m128i L2 = _mm_min_epi32(L1p, H1p);
     __m128i H2 = _mm_max_epi32(L1p, H1p);
 
-    // Shuffle 2
+    // Shuffle
     __m128i L2p = _mm_blend_epi32(L2, H2, _128_BLEND_2);
     __m128i H2p = _mm_blend_epi32(H2, L2, _128_BLEND_2);
     H2p = _mm_shuffle_epi32(H2p, _128_SHUFFLE_2);
@@ -50,7 +50,7 @@ void merge_128_registers(
     __m128i L3 = _mm_min_epi32(L2p, H2p);
     __m128i H3 = _mm_max_epi32(L2p, H2p);
 
-    //Shuffle 3
+    //Shuffle
     __m128i H3p =  _mm_shuffle_epi32(H3, _128_SHUFFLE_3);
     __m128i L3p =  _mm_blend_epi32(L3, H3p, _128_BLEND_3);
     H3p = _mm_blend_epi32(H3p, L3, _128_BLEND_3);
@@ -65,7 +65,7 @@ void merge_128_registers(
 
 
 // 512 Constants
-
+const __mmask16 _512_BLEND_1 = 0b1111111100000000;
 
 /*
  * Takes in two m512i registers and merges them in place.
@@ -81,10 +81,20 @@ void merge_512_registers(
     *right = _mm512_permutexvar_epi32(_512_REV, *right);
     print_512_num(*right);
     // Level 1
+    // Get min/max values
+    __m512i L1 = _mm512_min_epi32(*left, *right);
+    __m512i H1 = _mm512_max_epi32(*left, *right);
+    //Shuffle
+    __m512i L1p = _mm512_mask_blend_epi32(_512_BLEND_1, L1, H1);
+    __m512i H1p = _mm512_mask_blend_epi32(_512_BLEND_1, H1, H1);
+    print_512_num(L1p);
+    print_512_num(H1p);
     // Level 2
+    // Get min/max values
+    //Shuffle
     // Levels 3-4
     // Break each register up into 4 __mm128i registers and pass them into the
-    // merge_128_registers function
+    // merge_128_registers function. Perhaps this should be put in an array...
     __m128i H3_0 = _mm512_extracti32x4_epi32(*right, 0);
     __m128i H3_1 = _mm512_extracti32x4_epi32(*right, 1);
     __m128i H3_2 = _mm512_extracti32x4_epi32(*right, 2);
@@ -93,8 +103,4 @@ void merge_512_registers(
     __m128i L3_1 = _mm512_extracti32x4_epi32(*left, 1);
     __m128i L3_2 = _mm512_extracti32x4_epi32(*left, 2);
     __m128i L3_3 = _mm512_extracti32x4_epi32(*left, 3);
-    print_128_num(L3_0);
-    print_128_num(L3_1);
-    print_128_num(L3_2);
-    print_128_num(L3_3);
 }
