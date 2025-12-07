@@ -27,12 +27,15 @@ void insertion_sort(uint32_t *arr, size_t size) {
 }
 
 // Base case threshold: use insertion sort for arrays smaller than this
-#define SORT_THRESHOLD 2
+// Set to 32 for performance (insertion sort is faster for small arrays)
+// Set to 1 for minimal base case (single elements are trivially sorted)
+#define SORT_THRESHOLD 32
 
 void basic_merge_sort(uint32_t *arr, size_t size) {
     // Base case: use insertion sort for small arrays
+    // IMPORTANT: Must actually sort! Merge assumes sorted inputs.
     if (size <= SORT_THRESHOLD) {
-        //insertion_sort(arr, size);
+        insertion_sort(arr, size);
         return;
     }
     int middle = size / 2;

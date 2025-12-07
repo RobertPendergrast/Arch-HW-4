@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -O2 -mavx512f
+CFLAGS = -Wall -O3 -mavx512f
 LDFLAGS = -pthread
 
 utils.o: utils.c utils.h
