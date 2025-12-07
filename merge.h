@@ -24,4 +24,5 @@ void merge_512_registers(
     __m512i *right
 );
 
+
 #endif

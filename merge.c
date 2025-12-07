@@ -128,3 +128,121 @@ void merge_512_registers(
     *right = _mm512_inserti64x4(*right, H3p_0, 0);
     *right = _mm512_inserti64x4(*right, H3p_1, 1);
 }
+
+void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
+    int i = 0;
+    int j = 0;
+    int k = 0;
+    // Merge the two arrays into arr
+    while (i < size_left && j < size_right) {
+        if (left[i] <= right[j]) {
+            arr[k++] = left[i++];
+        } else {
+            arr[k++] = right[j++];
+        }
+    }
+    // Merge the rest in
+    while (i < size_left) {
+        arr[k++] = left[i++];
+    }
+    while (j< size_right) {
+        arr[k++] = right[j++];
+    }
+}
+
+void merge_arrays(
+    uint32_t *left,
+    size_t size_left,
+    uint32_t *right,
+    size_t size_right,
+    uint32_t *arr
+) {
+    // For performance, try to make left and right cache line aligned, as well as arr
+    // Also, try to make the size_left and size_right cache line aligned, but we can handle if not
+    
+    //TODO: take this line out once done debugging
+    if(size_left < 16 || size_right < 16) {
+        fprintf(stderr, "Error: Arrays are too small to merge (size_left=%zu, size_right=%zu)\n", size_left, size_right);
+        exit(EXIT_FAILURE);
+    }
+
+    //creating a mm512i register from the left and right arrays
+    __m512i left_reg = _mm512_loadu_epi32((__m512i*) left);
+    __m512i right_reg = _mm512_loadu_epi32((__m512i*) right);
+
+    //merging the two registers
+    merge_512_registers(&left_reg, &right_reg);
+
+    //storing the result in the arr array
+    _mm512_storeu_epi32(arr, left_reg);
+    int right_idx = 16;
+    int left_idx = 16;
+    while(left_idx + 16 < size_left && right_idx + 16 < size_right) {
+        if(left[left_idx] <= right[right_idx]) {
+            left_reg = _mm512_loadu_epi32(left + left_idx);
+            left_idx += 16;
+        }
+        else {
+            right_reg = _mm512_loadu_epi32(right + right_idx);
+            right_idx += 16;
+        }
+        merge_512_registers(&left_reg, &right_reg);
+        _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
+    }
+    //doing a standerd merge of the remaining in left, right, and right_reg
+    //cast right_reg to a array of uint32_t
+    // the last element of right reg will be smaller than the first element if either left or right, so put it in that array before the counter and merge from there
+    if(right_reg[15] < left[left_idx]) {
+        //merging it with right
+        int reg_idx = 0;
+
+        while(reg_idx < 16 && right_idx < size_right) {
+            if(right_reg[reg_idx] < left[left_idx]) {
+                arr[left_idx + right_idx] = right_reg[reg_idx];
+                reg_idx++;
+            }
+            else {
+                arr[left_idx + right_idx] = left[left_idx];
+                left_idx++;
+            }
+        }
+        if(reg_idx < 16){
+            while(reg_idx < 16) {
+                arr[left_idx + right_idx] = right_reg[reg_idx];
+                reg_idx++;
+            }
+            while(left_idx < size_left) {
+                arr[left_idx + right_idx] = left[left_idx];
+                left_idx++;
+            }
+        }
+        else{
+            merge(left + left_idx, right + right_idx, arr + left_idx + right_idx, size_left - left_idx, size_right - right_idx);
+        }
+    }
+    else {
+        //merging it with left
+        int reg_idx = 0;
+        while(reg_idx < 16 && left_idx < size_left) {
+            if(left[left_idx] < right_reg[reg_idx]) {
+                arr[left_idx + right_idx] = left[left_idx];
+                left_idx++;
+            }
+        }
+        if(reg_idx < 16){
+            while(reg_idx < 16) {
+                arr[left_idx + right_idx] = right_reg[reg_idx];
+                reg_idx++;
+            }
+            while(right_idx < size_right) {
+                arr[left_idx + right_idx] = right[right_idx];
+                right_idx++;
+            }
+        }
+        else{
+            merge(left + left_idx, right + right_idx, arr + left_idx + right_idx, size_left - left_idx, size_right - right_idx);
+        }
+    }
+
+     
+}
