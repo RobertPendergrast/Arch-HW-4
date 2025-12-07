@@ -82,14 +82,19 @@ const __mmask16 _512_BLEND_1  = 0xAAAA;  // alternating:         0b1010101010101
  * 2. Compare-swap across registers (distance 16)
  * 3. Bitonic clean each register: distances 8, 4, 2, 1
  */
+// Static shuffle indices for cross-lane permutations (avoids recreating each call)
+static const int IDX_REV_ARR[16] __attribute__((aligned(64))) = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+static const int IDX_SWAP8_ARR[16] __attribute__((aligned(64))) = {7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8};
+static const int IDX_SWAP4_ARR[16] __attribute__((aligned(64))) = {11,10,9,8,15,14,13,12,3,2,1,0,7,6,5,4};
+
 inline __attribute__((always_inline)) void merge_512_registers(
     __m512i *left,
     __m512i *right
 ) {
-    // Shuffle indices for cross-lane permutations (distance 8 and 4)
-    const __m512i idx_rev = _mm512_set_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
-    const __m512i idx_swap8 = _mm512_set_epi32(7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8);
-    const __m512i idx_swap4 = _mm512_set_epi32(11,10,9,8,15,14,13,12,3,2,1,0,7,6,5,4);
+    // Load shuffle indices from static arrays
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV_ARR);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8_ARR);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4_ARR);
 
     // Step 0: Reverse right register to form bitonic sequence
     *right = _mm512_permutexvar_epi32(idx_rev, *right);
@@ -235,8 +240,8 @@ void merge_arrays(
         // No remainders - just output the pending 16
         _mm512_storeu_epi32(arr + output_pos, right_reg);
     } else {
-        // Allocate temp buffer for merged remainders
-        uint32_t *remainder_merged = (uint32_t*)malloc(remainder_size * sizeof(uint32_t));
+        // Stack buffer - max 30 elements (15 from each side worst case)
+        uint32_t remainder_merged[32];
         
         // Merge the two remainders
         merge_local(left + left_idx, right + right_idx, remainder_merged, 
@@ -244,7 +249,5 @@ void merge_arrays(
         
         // Merge pending 16 with the merged remainders into final output
         merge_local(pending, remainder_merged, arr + output_pos, 16, remainder_size);
-        
-        free(remainder_merged);
     }
 }
