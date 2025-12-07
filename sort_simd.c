@@ -175,14 +175,37 @@ static inline void sort_64_simd(uint32_t *arr) {
     sort_32_simd(arr + 32);
     
     // Merge the two 32-element sorted runs
-    // Use a small temp buffer for the merge
     uint32_t temp[64];
     merge_arrays(arr, 32, arr + 32, 32, temp);
     memcpy(arr, temp, 64 * sizeof(uint32_t));
 }
 
-// Base case threshold - must be multiple of 32 for SIMD efficiency
-#define SORT_THRESHOLD 64
+/*
+ * Sort 128 elements: sort two 64s, then merge.
+ */
+static inline void sort_128_simd(uint32_t *arr) {
+    sort_64_simd(arr);
+    sort_64_simd(arr + 64);
+    
+    uint32_t temp[128];
+    merge_arrays(arr, 64, arr + 64, 64, temp);
+    memcpy(arr, temp, 128 * sizeof(uint32_t));
+}
+
+/*
+ * Sort 256 elements: sort two 128s, then merge.
+ */
+static inline void sort_256_simd(uint32_t *arr) {
+    sort_128_simd(arr);
+    sort_128_simd(arr + 128);
+    
+    uint32_t temp[256];
+    merge_arrays(arr, 128, arr + 128, 128, temp);
+    memcpy(arr, temp, 256 * sizeof(uint32_t));
+}
+
+// Base case threshold - larger = fewer slow small-merge passes
+#define SORT_THRESHOLD 256
 
 // Helper for timing
 static inline double get_time_sec() {
@@ -202,9 +225,21 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     t_start = get_time_sec();
     size_t i = 0;
     
-    // Process full 64-element chunks with SIMD
-    for (; i + 64 <= size; i += 64) {
+    // Process full 256-element chunks with SIMD
+    for (; i + 256 <= size; i += 256) {
+        sort_256_simd(arr + i);
+    }
+    
+    // Process remaining 128-element chunk if present
+    if (i + 128 <= size) {
+        sort_128_simd(arr + i);
+        i += 128;
+    }
+    
+    // Process remaining 64-element chunk if present
+    if (i + 64 <= size) {
         sort_64_simd(arr + i);
+        i += 64;
     }
     
     // Process remaining 32-element chunk if present
