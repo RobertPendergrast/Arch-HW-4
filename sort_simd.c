@@ -14,7 +14,7 @@ void sort_array(uint32_t *arr, size_t size) {
 
 }
 
-// Insertion sort for small arrays
+// Insertion sort for small/remainder arrays
 static inline void insertion_sort(uint32_t *arr, size_t size) {
     for (size_t i = 1; i < size; i++) {
         uint32_t key = arr[i];
@@ -27,35 +27,155 @@ static inline void insertion_sort(uint32_t *arr, size_t size) {
     }
 }
 
-// SIMD sorting network for exactly 32 elements (two 512-bit registers)
+// ============== SIMD Sorting Network ==============
+// Bitonic sort for 16 elements in a single 512-bit register
+
+// Sorting-specific shuffle indices (not shared with merge)
+static const int SORT_SWAP1_IDX[16] __attribute__((aligned(64))) = 
+    {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};  // swap adjacent pairs
+static const int SORT_SWAP2_IDX[16] __attribute__((aligned(64))) = 
+    {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};  // reverse within groups of 4
+
+// IDX_REV (full reverse) and IDX_SWAP4 are imported from merge.h
+
+/*
+ * Bitonic sort for 16 uint32_t elements in a single __m512i register.
+ * Uses compare-swap network to fully sort the register.
+ */
+static inline __m512i sort_16_simd(__m512i v) {
+    // Load shuffle indices
+    const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
+    const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
+    const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
+    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
+    
+    __m512i t, lo, hi;
+    
+    // Stage 1: Sort pairs (build sorted 2s with alternating direction)
+    // Pairs at positions (0,1), (2,3), ... with alternating asc/desc
+    t = _mm512_permutexvar_epi32(swap1, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xAAAA, lo, hi);  // 0:asc, 1:desc pattern
+    
+    // Stage 2: Merge pairs into sorted 4s
+    // Step 2a: distance 2 compare-swap
+    t = _mm512_permutexvar_epi32(swap2, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
+    
+    // Step 2b: distance 1 compare-swap (clean)
+    t = _mm512_permutexvar_epi32(swap1, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
+    
+    // Stage 3: Merge 4s into sorted 8s
+    // Step 3a: distance 4 compare-swap
+    t = _mm512_permutexvar_epi32(swap4, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
+    
+    // Step 3b: distance 2 compare-swap
+    t = _mm512_permutexvar_epi32(swap2, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
+    
+    // Step 3c: distance 1 compare-swap
+    t = _mm512_permutexvar_epi32(swap1, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
+    
+    // Stage 4: Merge 8s into sorted 16
+    // Step 4a: distance 8 compare-swap
+    t = _mm512_permutexvar_epi32(swap8, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xFF00, lo, hi);
+    
+    // Step 4b: distance 4 compare-swap
+    t = _mm512_permutexvar_epi32(swap4, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
+    
+    // Step 4c: distance 2 compare-swap
+    t = _mm512_permutexvar_epi32(swap2, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
+    
+    // Step 4d: distance 1 compare-swap
+    t = _mm512_permutexvar_epi32(swap1, v);
+    lo = _mm512_min_epu32(v, t);
+    hi = _mm512_max_epu32(v, t);
+    v = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
+    
+    return v;
+}
+
+/*
+ * Sort 32 elements using SIMD: sort two 16-element registers, then merge them.
+ */
 static inline void sort_32_simd(uint32_t *arr) {
+    // Load and sort each half
     __m512i a = _mm512_loadu_epi32(arr);
     __m512i b = _mm512_loadu_epi32(arr + 16);
     
-    // Sort each register individually using bitonic sort
-    // This requires sorting network within each register first
-    // For now, use merge to combine two sorted halves
+    a = sort_16_simd(a);
+    b = sort_16_simd(b);
     
-    // Sort first 16: split into two 8s, sort, merge
-    // Simplified: just merge the two registers (assumes inputs need full sort)
-    // We'll use a simple approach: sort in place then merge
+    // Merge the two sorted halves using existing merge network
+    merge_512_registers(&a, &b);
     
-    // For a proper 32-element sort, we need a full sorting network
-    // Fallback to insertion sort for the base case for correctness
-    insertion_sort(arr, 32);
+    // Store results
+    _mm512_storeu_epi32(arr, a);
+    _mm512_storeu_epi32(arr + 16, b);
 }
 
-// Base case threshold - larger = fewer merge passes, but base sort matters more
+/*
+ * Sort 64 elements using SIMD: sort four 16-element chunks, then merge.
+ */
+static inline void sort_64_simd(uint32_t *arr) {
+    // Sort each 32-element half
+    sort_32_simd(arr);
+    sort_32_simd(arr + 32);
+    
+    // Merge the two 32-element sorted runs
+    // Use a small temp buffer for the merge
+    uint32_t temp[64];
+    merge_arrays(arr, 32, arr + 32, 32, temp);
+    memcpy(arr, temp, 64 * sizeof(uint32_t));
+}
+
+// Base case threshold - must be multiple of 32 for SIMD efficiency
 #define SORT_THRESHOLD 64
 
 // Bottom-up merge sort: O(1) allocations instead of O(N) allocations!
 void basic_merge_sort(uint32_t *arr, size_t size) {
     if (size <= 1) return;
     
-    // Step 1: Sort all base-case chunks in place
-    for (size_t i = 0; i < size; i += SORT_THRESHOLD) {
-        size_t chunk_size = (i + SORT_THRESHOLD <= size) ? SORT_THRESHOLD : (size - i);
-        insertion_sort(arr + i, chunk_size);
+    // Step 1: Sort all base-case chunks in place using SIMD
+    size_t i = 0;
+    
+    // Process full 64-element chunks with SIMD
+    for (; i + 64 <= size; i += 64) {
+        sort_64_simd(arr + i);
+    }
+    
+    // Process remaining 32-element chunk if present
+    if (i + 32 <= size) {
+        sort_32_simd(arr + i);
+        i += 32;
+    }
+    
+    // Handle any remainder with insertion sort
+    if (i < size) {
+        insertion_sort(arr + i, size - i);
     }
     
     // Step 2: Allocate ONE temp buffer for all merges
