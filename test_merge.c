@@ -264,7 +264,9 @@ int test_merge_512_large_unsigned() {
 int test_merge_arrays_16_16() {
     printf("  test_merge_arrays_16_16: ");
     
-    uint32_t left[16], right[16], result[32];
+    uint32_t left[16] __attribute__((aligned(64)));
+    uint32_t right[16] __attribute__((aligned(64)));
+    uint32_t result[32] __attribute__((aligned(64)));
     for (int i = 0; i < 16; i++) {
         left[i] = 2*i + 1;   // 1, 3, 5, ..., 31
         right[i] = 2*i + 2;  // 2, 4, 6, ..., 32
@@ -288,7 +290,9 @@ int test_merge_arrays_16_16() {
 int test_merge_arrays_32_32() {
     printf("  test_merge_arrays_32_32: ");
     
-    uint32_t left[32], right[32], result[64];
+    uint32_t left[32] __attribute__((aligned(64)));
+    uint32_t right[32] __attribute__((aligned(64)));
+    uint32_t result[64] __attribute__((aligned(64)));
     for (int i = 0; i < 32; i++) {
         left[i] = 2*i + 1;   // 1, 3, 5, ..., 63
         right[i] = 2*i + 2;  // 2, 4, 6, ..., 64
@@ -312,7 +316,9 @@ int test_merge_arrays_32_32() {
 int test_merge_arrays_33_33() {
     printf("  test_merge_arrays_33_33 (non-multiple of 16): ");
     
-    uint32_t left[33], right[33], result[66];
+    uint32_t left[33] __attribute__((aligned(64)));
+    uint32_t right[33] __attribute__((aligned(64)));
+    uint32_t result[66] __attribute__((aligned(64)));
     for (int i = 0; i < 33; i++) {
         left[i] = 2*i + 1;
         right[i] = 2*i + 2;
@@ -336,6 +342,7 @@ int test_merge_arrays_33_33() {
 int test_merge_arrays_small() {
     printf("  test_merge_arrays_small (< 16 elements): ");
     
+    // Small arrays use scalar merge, no alignment needed
     uint32_t left[] = {1, 3, 5, 7, 9};
     uint32_t right[] = {2, 4, 6, 8, 10};
     uint32_t result[10];
@@ -358,9 +365,10 @@ int test_merge_arrays_small() {
 int test_merge_arrays_asymmetric() {
     printf("  test_merge_arrays_asymmetric (17 + 31): ");
     
-    uint32_t *left = malloc(17 * sizeof(uint32_t));
-    uint32_t *right = malloc(31 * sizeof(uint32_t));
-    uint32_t *result = malloc(48 * sizeof(uint32_t));
+    uint32_t *left = NULL, *right = NULL, *result = NULL;
+    posix_memalign((void**)&left, 64, 17 * sizeof(uint32_t));
+    posix_memalign((void**)&right, 64, 31 * sizeof(uint32_t));
+    posix_memalign((void**)&result, 64, 48 * sizeof(uint32_t));
     
     // Left has odd numbers 1-33
     for (int i = 0; i < 17; i++) left[i] = 2*i + 1;
@@ -381,9 +389,10 @@ int test_merge_arrays_asymmetric() {
 int test_merge_arrays_large() {
     printf("  test_merge_arrays_large (1000 + 1000): ");
     
-    uint32_t *left = malloc(1000 * sizeof(uint32_t));
-    uint32_t *right = malloc(1000 * sizeof(uint32_t));
-    uint32_t *result = malloc(2000 * sizeof(uint32_t));
+    uint32_t *left = NULL, *right = NULL, *result = NULL;
+    posix_memalign((void**)&left, 64, 1000 * sizeof(uint32_t));
+    posix_memalign((void**)&right, 64, 1000 * sizeof(uint32_t));
+    posix_memalign((void**)&result, 64, 2000 * sizeof(uint32_t));
     
     for (int i = 0; i < 1000; i++) {
         left[i] = 2*i + 1;
@@ -411,9 +420,10 @@ int test_merge_arrays_random_large() {
     printf("  test_merge_arrays_random_large (5000 + 5000 random): ");
     
     size_t size = 5000;
-    uint32_t *left = malloc(size * sizeof(uint32_t));
-    uint32_t *right = malloc(size * sizeof(uint32_t));
-    uint32_t *result = malloc(2 * size * sizeof(uint32_t));
+    uint32_t *left = NULL, *right = NULL, *result = NULL;
+    posix_memalign((void**)&left, 64, size * sizeof(uint32_t));
+    posix_memalign((void**)&right, 64, size * sizeof(uint32_t));
+    posix_memalign((void**)&result, 64, 2 * size * sizeof(uint32_t));
     
     // Generate sorted random arrays
     uint32_t val = 0;
@@ -459,9 +469,10 @@ int test_merge_arrays_edge_sizes() {
         for (int sj = 0; sj < num_sizes && pass; sj++) {
             int s1 = sizes[si], s2 = sizes[sj];
             
-            uint32_t *left = malloc(s1 * sizeof(uint32_t));
-            uint32_t *right = malloc(s2 * sizeof(uint32_t));
-            uint32_t *result = malloc((s1 + s2) * sizeof(uint32_t));
+            uint32_t *left = NULL, *right = NULL, *result = NULL;
+            posix_memalign((void**)&left, 64, s1 * sizeof(uint32_t));
+            posix_memalign((void**)&right, 64, s2 * sizeof(uint32_t));
+            posix_memalign((void**)&result, 64, (s1 + s2) * sizeof(uint32_t));
             
             uint32_t val = 0;
             for (int i = 0; i < s1; i++) { val += rand() % 5 + 1; left[i] = val; }
@@ -551,8 +562,9 @@ int test_full_sort() {
         size_t size = sizes[si];
         printf("    Size %zu: ", size);
         
-        uint32_t *arr = malloc(size * sizeof(uint32_t));
-        uint32_t *copy = malloc(size * sizeof(uint32_t));
+        uint32_t *arr = NULL, *copy = NULL;
+        posix_memalign((void**)&arr, 64, size * sizeof(uint32_t));
+        posix_memalign((void**)&copy, 64, size * sizeof(uint32_t));
         
         // Generate random data
         for (size_t i = 0; i < size; i++) {

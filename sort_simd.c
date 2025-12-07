@@ -186,6 +186,10 @@ static inline void sort_64_simd(uint32_t *arr) {
 // Base case threshold - must be multiple of 32 for SIMD efficiency
 #define SORT_THRESHOLD 64
 
+// L3 cache size: 32 MiB = 8M uint32_t elements
+// Sort entire chunks of this size before moving on (cache locality optimization)
+#define L3_CHUNK_ELEMENTS (8 * 1024 * 1024)
+
 // Helper for timing
 static inline double get_time_sec() {
     struct timespec ts;
@@ -193,95 +197,139 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// Bottom-up merge sort: O(1) allocations instead of O(N) allocations!
+// Sort a single chunk completely (all merge passes up to chunk_size)
+// This keeps all small merges in L3 cache for better locality
+static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
+    // Step 1: Base case sort (64-element chunks)
+    size_t i = 0;
+    for (; i + 64 <= chunk_size; i += 64) {
+        sort_64_simd(arr + i);
+    }
+    if (i + 32 <= chunk_size) {
+        sort_32_simd(arr + i);
+        i += 32;
+    }
+    if (i < chunk_size) {
+        insertion_sort(arr + i, chunk_size - i);
+    }
+    
+    // Step 2: All merge passes within this chunk
+    uint32_t *src = arr;
+    uint32_t *dst = temp;
+    
+    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
+        size_t j = 0;
+        while (j < chunk_size) {
+            size_t left_start = j;
+            size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
+            size_t right_start = left_start + left_size;
+            size_t right_size = 0;
+            
+            if (right_start < chunk_size) {
+                right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
+            }
+            
+            if (right_size == 0) {
+                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+            } else {
+                merge_arrays(src + left_start, left_size, 
+                           src + right_start, right_size, 
+                           dst + left_start);
+            }
+            
+            j = right_start + right_size;
+        }
+        
+        // Swap src and dst
+        uint32_t *swap = src;
+        src = dst;
+        dst = swap;
+    }
+    
+    // Copy result back to arr if needed
+    if (src != arr) {
+        memcpy(arr, src, chunk_size * sizeof(uint32_t));
+    }
+}
+
+// Bottom-up merge sort with L3 cache blocking
 void basic_merge_sort(uint32_t *arr, size_t size) {
     if (size <= 1) return;
     
     double t_start, t_end;
     int pass_num = 0;
     
-    // Step 1: Sort all base-case chunks in place using SIMD
-    t_start = get_time_sec();
-    size_t i = 0;
-    
-    // Process full 64-element chunks with SIMD
-    for (; i + 64 <= size; i += 64) {
-        sort_64_simd(arr + i);
-    }
-    
-    // Process remaining 32-element chunk if present
-    if (i + 32 <= size) {
-        sort_32_simd(arr + i);
-        i += 32;
-    }
-    
-    // Handle any remainder with insertion sort
-    if (i < size) {
-        insertion_sort(arr + i, size - i);
-    }
-    t_end = get_time_sec();
-    printf("  [Pass %2d] Base case sort (chunks of %d): %.3f sec\n", 
-           pass_num++, SORT_THRESHOLD, t_end - t_start);
-    
-    // Step 2: Allocate ONE temp buffer for all merges
+    // Allocate temp buffer (reused for all operations)
     uint32_t *temp = NULL;
     if (posix_memalign((void**)&temp, 64, size * sizeof(uint32_t)) != 0) {
         fprintf(stderr, "posix_memalign failed for temp buffer\n");
         exit(EXIT_FAILURE);
     }
     
-    // Step 3: Bottom-up merge passes
-    // Each pass doubles the size of sorted runs
-    uint32_t *src = arr;
-    uint32_t *dst = temp;
+    // Step 1: Sort each L3-sized chunk completely
+    // This keeps all small merges (which are slow) in L3 cache
+    t_start = get_time_sec();
+    size_t num_chunks = (size + L3_CHUNK_ELEMENTS - 1) / L3_CHUNK_ELEMENTS;
     
-    for (size_t width = SORT_THRESHOLD; width < size; width *= 2) {
-        t_start = get_time_sec();
-        size_t num_merges = 0;
+    for (size_t c = 0; c < size; c += L3_CHUNK_ELEMENTS) {
+        size_t chunk_size = (c + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - c);
+        sort_chunk(arr + c, chunk_size, temp + c);
+    }
+    t_end = get_time_sec();
+    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec\n", 
+           num_chunks, t_end - t_start);
+    
+    // Step 2: Merge L3-sized chunks together (these are large merges, ~7 GB/s)
+    // Only needed if we have more than one chunk
+    if (size > L3_CHUNK_ELEMENTS) {
+        uint32_t *src = arr;
+        uint32_t *dst = temp;
         
-        // Merge adjacent pairs of runs
-        size_t i = 0;
-        while (i < size) {
-            size_t left_start = i;
-            size_t left_size = (left_start + width <= size) ? width : (size - left_start);
-            size_t right_start = left_start + left_size;
-            size_t right_size = 0;
+        for (size_t width = L3_CHUNK_ELEMENTS; width < size; width *= 2) {
+            t_start = get_time_sec();
+            size_t num_merges = 0;
             
-            if (right_start < size) {
-                right_size = (right_start + width <= size) ? width : (size - right_start);
+            size_t i = 0;
+            while (i < size) {
+                size_t left_start = i;
+                size_t left_size = (left_start + width <= size) ? width : (size - left_start);
+                size_t right_start = left_start + left_size;
+                size_t right_size = 0;
+                
+                if (right_start < size) {
+                    right_size = (right_start + width <= size) ? width : (size - right_start);
+                }
+                
+                if (right_size == 0) {
+                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                } else {
+                    merge_arrays(src + left_start, left_size, 
+                               src + right_start, right_size, 
+                               dst + left_start);
+                    num_merges++;
+                }
+                
+                i = right_start + right_size;
             }
             
-            if (right_size == 0) {
-                // No right half - just copy left to dst
-                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
-            } else {
-                // Merge left and right into dst
-                merge_arrays(src + left_start, left_size, 
-                           src + right_start, right_size, 
-                           dst + left_start);
-                num_merges++;
-            }
+            t_end = get_time_sec();
+            double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
+            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n", 
+                   width, t_end - t_start, num_merges, throughput);
             
-            i = right_start + right_size;
+            // Swap src and dst
+            uint32_t *swap = src;
+            src = dst;
+            dst = swap;
         }
         
-        t_end = get_time_sec();
-        double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-        printf("  [Pass %2d] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n", 
-               pass_num++, width, t_end - t_start, num_merges, throughput);
-        
-        // Swap src and dst for next pass
-        uint32_t *swap = src;
-        src = dst;
-        dst = swap;
-    }
-    
-    // If result ended up in temp, copy back to arr
-    if (src != arr) {
-        t_start = get_time_sec();
-        memcpy(arr, src, size * sizeof(uint32_t));
-        t_end = get_time_sec();
-        printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
+        // Copy result back to arr if needed
+        if (src != arr) {
+            t_start = get_time_sec();
+            memcpy(arr, src, size * sizeof(uint32_t));
+            t_end = get_time_sec();
+            printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
+        }
     }
     
     free(temp);
