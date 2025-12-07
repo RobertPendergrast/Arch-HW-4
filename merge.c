@@ -216,17 +216,16 @@ void merge_arrays(
         __m512i next_left = _mm512_loadu_epi32(left + left_idx);
         __m512i next_right = _mm512_loadu_epi32(right + right_idx);
         
-        // Compare first elements to decide which chunk to use
-        unsigned int take_left = left[left_idx] <= right[right_idx];
+        // Branchless comparison: 1 if take_left, 0 otherwise
+        size_t cmp = (left[left_idx] <= right[right_idx]);
         
-        // Branchless select: if take_left, use next_left; else use next_right
-        // Using mask blend: mask=0xFFFF means take from second arg (next_left)
-        __mmask16 mask = take_left ? 0xFFFF : 0x0000;
+        // Create 16-bit mask for blend (0xFFFF or 0x0000)
+        __mmask16 mask = ((__mmask16)0) - ((__mmask16)cmp);
         left_reg = _mm512_mask_blend_epi32(mask, next_right, next_left);
         
         // Branchless index update
-        left_idx += take_left * 16;
-        right_idx += (!take_left) * 16;
+        left_idx += cmp << 4;        // cmp * 16
+        right_idx += (1 - cmp) << 4; // (1 - cmp) * 16
         
         merge_512_registers(&left_reg, &right_reg);
         _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
