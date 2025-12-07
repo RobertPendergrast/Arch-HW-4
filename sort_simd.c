@@ -149,11 +149,12 @@ static inline __m512i sort_16_simd(__m512i v) {
 
 /*
  * Sort 32 elements using SIMD: sort two 16-element registers, then merge them.
+ * Requires arr to be 64-byte aligned.
  */
 static inline void sort_32_simd(uint32_t *arr) {
-    // Load and sort each half
-    __m512i a = _mm512_loadu_epi32(arr);
-    __m512i b = _mm512_loadu_epi32(arr + 16);
+    // Load and sort each half (aligned loads for cache efficiency)
+    __m512i a = _mm512_load_epi32(arr);
+    __m512i b = _mm512_load_epi32(arr + 16);
     
     a = sort_16_simd(a);
     b = sort_16_simd(b);
@@ -161,13 +162,14 @@ static inline void sort_32_simd(uint32_t *arr) {
     // Merge the two sorted halves using existing merge network
     merge_512_registers(&a, &b);
     
-    // Store results
-    _mm512_storeu_epi32(arr, a);
-    _mm512_storeu_epi32(arr + 16, b);
+    // Store results (aligned stores for cache efficiency)
+    _mm512_store_epi32(arr, a);
+    _mm512_store_epi32(arr + 16, b);
 }
 
 /*
  * Sort 64 elements using SIMD: sort four 16-element chunks, then merge.
+ * Requires arr to be 64-byte aligned.
  */
 static inline void sort_64_simd(uint32_t *arr) {
     // Sort each 32-element half
@@ -175,8 +177,8 @@ static inline void sort_64_simd(uint32_t *arr) {
     sort_32_simd(arr + 32);
     
     // Merge the two 32-element sorted runs
-    // Use a small temp buffer for the merge
-    uint32_t temp[64];
+    // Use a 64-byte aligned temp buffer for cache-aligned SIMD operations
+    uint32_t temp[64] __attribute__((aligned(64)));
     merge_arrays(arr, 32, arr + 32, 32, temp);
     memcpy(arr, temp, 64 * sizeof(uint32_t));
 }

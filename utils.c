@@ -25,9 +25,9 @@ uint32_t* read_array_from_file(const char *filename, uint64_t *out_size) {
         return NULL;
     }
 
-    // Allocate array
-    uint32_t *arr = malloc(size * sizeof(uint32_t));
-    if (!arr) {
+    // Allocate 64-byte aligned array for cache line and SIMD alignment
+    uint32_t *arr = NULL;
+    if (posix_memalign((void**)&arr, 64, size * sizeof(uint32_t)) != 0) {
         printf("Error: Memory allocation failed\n");
         fclose(file);
         return NULL;

@@ -196,11 +196,11 @@ void merge_arrays(
         return;
     }
 
-    //creating a mm512i register from the left and right arrays
-    __m512i left_reg = _mm512_loadu_epi32((__m512i*) left);
-    __m512i right_reg = _mm512_loadu_epi32((__m512i*) right);
+    // Load from left and right arrays (aligned for cache efficiency)
+    __m512i left_reg = _mm512_load_epi32((__m512i*) left);
+    __m512i right_reg = _mm512_load_epi32((__m512i*) right);
     merge_512_registers(&left_reg, &right_reg);
-    _mm512_storeu_epi32(arr, left_reg);
+    _mm512_store_epi32(arr, left_reg);
     
     size_t right_idx = 16;
     size_t left_idx = 16;
@@ -212,9 +212,9 @@ void merge_arrays(
         _mm_prefetch((const char*)(left + left_idx + 64), _MM_HINT_T0);
         _mm_prefetch((const char*)(right + right_idx + 64), _MM_HINT_T0);
         
-        // Speculatively load both next chunks
-        __m512i next_left = _mm512_loadu_epi32(left + left_idx);
-        __m512i next_right = _mm512_loadu_epi32(right + right_idx);
+        // Speculatively load both next chunks (aligned for cache efficiency)
+        __m512i next_left = _mm512_load_epi32(left + left_idx);
+        __m512i next_right = _mm512_load_epi32(right + right_idx);
         
         // Compare first elements to decide which chunk to use
         unsigned int take_left = left[left_idx] <= right[right_idx];
@@ -229,7 +229,7 @@ void merge_arrays(
         right_idx += (!take_left) * 16;
         
         merge_512_registers(&left_reg, &right_reg);
-        _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
+        _mm512_store_epi32(arr + left_idx + right_idx - 32, left_reg);
     }
     
     // At this point, at least one side cannot provide a full 16-element chunk.
@@ -252,8 +252,8 @@ void merge_arrays(
     size_t remainder_size = left_remaining + right_remaining;
     
     if (remainder_size == 0) {
-        // No remainders - just output the pending 16
-        _mm512_storeu_epi32(arr + output_pos, right_reg);
+        // No remainders - just output the pending 16 (aligned store)
+        _mm512_store_epi32(arr + output_pos, right_reg);
     } else {
         // Stack buffer - max 30 elements (15 from each side worst case)
         uint32_t remainder_merged[32];
