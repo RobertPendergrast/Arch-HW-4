@@ -252,10 +252,10 @@ void merge_arrays(
             merge_local(remainder_merged, right + right_idx, arr + output_pos, 
               left_remaining + 16, right_remaining);
         } else {
-            merge_local(pending, left + left_idx, remainder_merged, 
-              16, left_remaining);
-            merge_local(remainder_merged, right + right_idx, arr + output_pos, 
-              left_remaining + 16, right_remaining);
+            merge_local(right + right_idx, pending, remainder_merged, 
+              right_remaining, 16);
+            merge_local(remainder_merged, left + left_idx, arr + output_pos, 
+              right_remaining + 16, left_remaining);
         }
     }
 }
