@@ -248,8 +248,375 @@ static inline void sort_64_simd(uint32_t *arr) {
     memcpy(arr, temp, 64 * sizeof(uint32_t));
 }
 
-// Base case threshold - must be multiple of 32 for SIMD efficiency
-#define SORT_THRESHOLD 64
+/*
+ * BATCHED: Sort 256 elements (4 × 64-element blocks) with maximum ILP.
+ * Interleaves operations across 4 independent blocks to hide SIMD latency.
+ * Each permute has ~3 cycle latency; by interleaving, we keep the execution units busy.
+ * Requires arr to be 64-byte aligned.
+ */
+static inline void sort_256_simd(uint32_t *arr) {
+    // Load shuffle indices ONCE for all 4 blocks
+    const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
+    const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
+    const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
+    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+
+    // Load all 16 registers (4 blocks × 4 registers each)
+    // Block 0: a0-d0, Block 1: a1-d1, Block 2: a2-d2, Block 3: a3-d3
+    __m512i a0 = _mm512_load_epi32(arr);
+    __m512i b0 = _mm512_load_epi32(arr + 16);
+    __m512i c0 = _mm512_load_epi32(arr + 32);
+    __m512i d0 = _mm512_load_epi32(arr + 48);
+    
+    __m512i a1 = _mm512_load_epi32(arr + 64);
+    __m512i b1 = _mm512_load_epi32(arr + 80);
+    __m512i c1 = _mm512_load_epi32(arr + 96);
+    __m512i d1 = _mm512_load_epi32(arr + 112);
+    
+    __m512i a2 = _mm512_load_epi32(arr + 128);
+    __m512i b2 = _mm512_load_epi32(arr + 144);
+    __m512i c2 = _mm512_load_epi32(arr + 160);
+    __m512i d2 = _mm512_load_epi32(arr + 176);
+    
+    __m512i a3 = _mm512_load_epi32(arr + 192);
+    __m512i b3 = _mm512_load_epi32(arr + 208);
+    __m512i c3 = _mm512_load_epi32(arr + 224);
+    __m512i d3 = _mm512_load_epi32(arr + 240);
+
+    // ========== Sort all 16 registers (interleaved for ILP) ==========
+    // Stage 1 of sort_16 for all registers
+    __m512i t0, t1, t2, t3, lo, hi;
+    
+    // All blocks: Stage 1 - distance 1 swaps (interleaved)
+    t0 = _mm512_permutexvar_epi32(swap1, a0);
+    t1 = _mm512_permutexvar_epi32(swap1, a1);
+    t2 = _mm512_permutexvar_epi32(swap1, a2);
+    t3 = _mm512_permutexvar_epi32(swap1, a3);
+    a0 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, b0);
+    t1 = _mm512_permutexvar_epi32(swap1, b1);
+    t2 = _mm512_permutexvar_epi32(swap1, b2);
+    t3 = _mm512_permutexvar_epi32(swap1, b3);
+    b0 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, c0);
+    t1 = _mm512_permutexvar_epi32(swap1, c1);
+    t2 = _mm512_permutexvar_epi32(swap1, c2);
+    t3 = _mm512_permutexvar_epi32(swap1, c3);
+    c0 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, d0);
+    t1 = _mm512_permutexvar_epi32(swap1, d1);
+    t2 = _mm512_permutexvar_epi32(swap1, d2);
+    t3 = _mm512_permutexvar_epi32(swap1, d3);
+    d0 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0x6666, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 2a - distance 2
+    t0 = _mm512_permutexvar_epi32(swap2, a0); t1 = _mm512_permutexvar_epi32(swap2, a1);
+    t2 = _mm512_permutexvar_epi32(swap2, a2); t3 = _mm512_permutexvar_epi32(swap2, a3);
+    a0 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, b0); t1 = _mm512_permutexvar_epi32(swap2, b1);
+    t2 = _mm512_permutexvar_epi32(swap2, b2); t3 = _mm512_permutexvar_epi32(swap2, b3);
+    b0 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, c0); t1 = _mm512_permutexvar_epi32(swap2, c1);
+    t2 = _mm512_permutexvar_epi32(swap2, c2); t3 = _mm512_permutexvar_epi32(swap2, c3);
+    c0 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, d0); t1 = _mm512_permutexvar_epi32(swap2, d1);
+    t2 = _mm512_permutexvar_epi32(swap2, d2); t3 = _mm512_permutexvar_epi32(swap2, d3);
+    d0 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0xC3C3, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 2b - distance 1
+    t0 = _mm512_permutexvar_epi32(swap1, a0); t1 = _mm512_permutexvar_epi32(swap1, a1);
+    t2 = _mm512_permutexvar_epi32(swap1, a2); t3 = _mm512_permutexvar_epi32(swap1, a3);
+    a0 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, b0); t1 = _mm512_permutexvar_epi32(swap1, b1);
+    t2 = _mm512_permutexvar_epi32(swap1, b2); t3 = _mm512_permutexvar_epi32(swap1, b3);
+    b0 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, c0); t1 = _mm512_permutexvar_epi32(swap1, c1);
+    t2 = _mm512_permutexvar_epi32(swap1, c2); t3 = _mm512_permutexvar_epi32(swap1, c3);
+    c0 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, d0); t1 = _mm512_permutexvar_epi32(swap1, d1);
+    t2 = _mm512_permutexvar_epi32(swap1, d2); t3 = _mm512_permutexvar_epi32(swap1, d3);
+    d0 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0xA5A5, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 3a - distance 4
+    t0 = _mm512_permutexvar_epi32(swap4, a0); t1 = _mm512_permutexvar_epi32(swap4, a1);
+    t2 = _mm512_permutexvar_epi32(swap4, a2); t3 = _mm512_permutexvar_epi32(swap4, a3);
+    a0 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap4, b0); t1 = _mm512_permutexvar_epi32(swap4, b1);
+    t2 = _mm512_permutexvar_epi32(swap4, b2); t3 = _mm512_permutexvar_epi32(swap4, b3);
+    b0 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap4, c0); t1 = _mm512_permutexvar_epi32(swap4, c1);
+    t2 = _mm512_permutexvar_epi32(swap4, c2); t3 = _mm512_permutexvar_epi32(swap4, c3);
+    c0 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap4, d0); t1 = _mm512_permutexvar_epi32(swap4, d1);
+    t2 = _mm512_permutexvar_epi32(swap4, d2); t3 = _mm512_permutexvar_epi32(swap4, d3);
+    d0 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0x0FF0, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 3b - distance 2
+    t0 = _mm512_permutexvar_epi32(swap2, a0); t1 = _mm512_permutexvar_epi32(swap2, a1);
+    t2 = _mm512_permutexvar_epi32(swap2, a2); t3 = _mm512_permutexvar_epi32(swap2, a3);
+    a0 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, b0); t1 = _mm512_permutexvar_epi32(swap2, b1);
+    t2 = _mm512_permutexvar_epi32(swap2, b2); t3 = _mm512_permutexvar_epi32(swap2, b3);
+    b0 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, c0); t1 = _mm512_permutexvar_epi32(swap2, c1);
+    t2 = _mm512_permutexvar_epi32(swap2, c2); t3 = _mm512_permutexvar_epi32(swap2, c3);
+    c0 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, d0); t1 = _mm512_permutexvar_epi32(swap2, d1);
+    t2 = _mm512_permutexvar_epi32(swap2, d2); t3 = _mm512_permutexvar_epi32(swap2, d3);
+    d0 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0x33CC, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 3c - distance 1
+    t0 = _mm512_permutexvar_epi32(swap1, a0); t1 = _mm512_permutexvar_epi32(swap1, a1);
+    t2 = _mm512_permutexvar_epi32(swap1, a2); t3 = _mm512_permutexvar_epi32(swap1, a3);
+    a0 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, b0); t1 = _mm512_permutexvar_epi32(swap1, b1);
+    t2 = _mm512_permutexvar_epi32(swap1, b2); t3 = _mm512_permutexvar_epi32(swap1, b3);
+    b0 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, c0); t1 = _mm512_permutexvar_epi32(swap1, c1);
+    t2 = _mm512_permutexvar_epi32(swap1, c2); t3 = _mm512_permutexvar_epi32(swap1, c3);
+    c0 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, d0); t1 = _mm512_permutexvar_epi32(swap1, d1);
+    t2 = _mm512_permutexvar_epi32(swap1, d2); t3 = _mm512_permutexvar_epi32(swap1, d3);
+    d0 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0x55AA, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 4a - distance 8
+    t0 = _mm512_permutexvar_epi32(swap8, a0); t1 = _mm512_permutexvar_epi32(swap8, a1);
+    t2 = _mm512_permutexvar_epi32(swap8, a2); t3 = _mm512_permutexvar_epi32(swap8, a3);
+    a0 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap8, b0); t1 = _mm512_permutexvar_epi32(swap8, b1);
+    t2 = _mm512_permutexvar_epi32(swap8, b2); t3 = _mm512_permutexvar_epi32(swap8, b3);
+    b0 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap8, c0); t1 = _mm512_permutexvar_epi32(swap8, c1);
+    t2 = _mm512_permutexvar_epi32(swap8, c2); t3 = _mm512_permutexvar_epi32(swap8, c3);
+    c0 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap8, d0); t1 = _mm512_permutexvar_epi32(swap8, d1);
+    t2 = _mm512_permutexvar_epi32(swap8, d2); t3 = _mm512_permutexvar_epi32(swap8, d3);
+    d0 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0xFF00, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 4b - distance 4
+    t0 = _mm512_permutexvar_epi32(swap4, a0); t1 = _mm512_permutexvar_epi32(swap4, a1);
+    t2 = _mm512_permutexvar_epi32(swap4, a2); t3 = _mm512_permutexvar_epi32(swap4, a3);
+    a0 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap4, b0); t1 = _mm512_permutexvar_epi32(swap4, b1);
+    t2 = _mm512_permutexvar_epi32(swap4, b2); t3 = _mm512_permutexvar_epi32(swap4, b3);
+    b0 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap4, c0); t1 = _mm512_permutexvar_epi32(swap4, c1);
+    t2 = _mm512_permutexvar_epi32(swap4, c2); t3 = _mm512_permutexvar_epi32(swap4, c3);
+    c0 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap4, d0); t1 = _mm512_permutexvar_epi32(swap4, d1);
+    t2 = _mm512_permutexvar_epi32(swap4, d2); t3 = _mm512_permutexvar_epi32(swap4, d3);
+    d0 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0xF0F0, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 4c - distance 2
+    t0 = _mm512_permutexvar_epi32(swap2, a0); t1 = _mm512_permutexvar_epi32(swap2, a1);
+    t2 = _mm512_permutexvar_epi32(swap2, a2); t3 = _mm512_permutexvar_epi32(swap2, a3);
+    a0 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, b0); t1 = _mm512_permutexvar_epi32(swap2, b1);
+    t2 = _mm512_permutexvar_epi32(swap2, b2); t3 = _mm512_permutexvar_epi32(swap2, b3);
+    b0 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, c0); t1 = _mm512_permutexvar_epi32(swap2, c1);
+    t2 = _mm512_permutexvar_epi32(swap2, c2); t3 = _mm512_permutexvar_epi32(swap2, c3);
+    c0 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap2, d0); t1 = _mm512_permutexvar_epi32(swap2, d1);
+    t2 = _mm512_permutexvar_epi32(swap2, d2); t3 = _mm512_permutexvar_epi32(swap2, d3);
+    d0 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0xCCCC, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // Stage 4d - distance 1
+    t0 = _mm512_permutexvar_epi32(swap1, a0); t1 = _mm512_permutexvar_epi32(swap1, a1);
+    t2 = _mm512_permutexvar_epi32(swap1, a2); t3 = _mm512_permutexvar_epi32(swap1, a3);
+    a0 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(a0, t0), _mm512_max_epu32(a0, t0));
+    a1 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(a1, t1), _mm512_max_epu32(a1, t1));
+    a2 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(a2, t2), _mm512_max_epu32(a2, t2));
+    a3 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(a3, t3), _mm512_max_epu32(a3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, b0); t1 = _mm512_permutexvar_epi32(swap1, b1);
+    t2 = _mm512_permutexvar_epi32(swap1, b2); t3 = _mm512_permutexvar_epi32(swap1, b3);
+    b0 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(b0, t0), _mm512_max_epu32(b0, t0));
+    b1 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(b1, t1), _mm512_max_epu32(b1, t1));
+    b2 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(b2, t2), _mm512_max_epu32(b2, t2));
+    b3 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(b3, t3), _mm512_max_epu32(b3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, c0); t1 = _mm512_permutexvar_epi32(swap1, c1);
+    t2 = _mm512_permutexvar_epi32(swap1, c2); t3 = _mm512_permutexvar_epi32(swap1, c3);
+    c0 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(c0, t0), _mm512_max_epu32(c0, t0));
+    c1 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(c1, t1), _mm512_max_epu32(c1, t1));
+    c2 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(c2, t2), _mm512_max_epu32(c2, t2));
+    c3 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(c3, t3), _mm512_max_epu32(c3, t3));
+    
+    t0 = _mm512_permutexvar_epi32(swap1, d0); t1 = _mm512_permutexvar_epi32(swap1, d1);
+    t2 = _mm512_permutexvar_epi32(swap1, d2); t3 = _mm512_permutexvar_epi32(swap1, d3);
+    d0 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(d0, t0), _mm512_max_epu32(d0, t0));
+    d1 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(d1, t1), _mm512_max_epu32(d1, t1));
+    d2 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(d2, t2), _mm512_max_epu32(d2, t2));
+    d3 = _mm512_mask_blend_epi32(0xAAAA, _mm512_min_epu32(d3, t3), _mm512_max_epu32(d3, t3));
+
+    // ========== Now all 16 registers are sorted. Merge into 32s (interleaved) ==========
+    // Merge a0+b0, c0+d0, a1+b1, c1+d1, a2+b2, c2+d2, a3+b3, c3+d3
+    merge_32_inline(&a0, &b0, idx_rev, swap8, swap4);
+    merge_32_inline(&a1, &b1, idx_rev, swap8, swap4);
+    merge_32_inline(&a2, &b2, idx_rev, swap8, swap4);
+    merge_32_inline(&a3, &b3, idx_rev, swap8, swap4);
+    merge_32_inline(&c0, &d0, idx_rev, swap8, swap4);
+    merge_32_inline(&c1, &d1, idx_rev, swap8, swap4);
+    merge_32_inline(&c2, &d2, idx_rev, swap8, swap4);
+    merge_32_inline(&c3, &d3, idx_rev, swap8, swap4);
+
+    // Store all results
+    _mm512_store_epi32(arr,       a0); _mm512_store_epi32(arr + 16,  b0);
+    _mm512_store_epi32(arr + 32,  c0); _mm512_store_epi32(arr + 48,  d0);
+    _mm512_store_epi32(arr + 64,  a1); _mm512_store_epi32(arr + 80,  b1);
+    _mm512_store_epi32(arr + 96,  c1); _mm512_store_epi32(arr + 112, d1);
+    _mm512_store_epi32(arr + 128, a2); _mm512_store_epi32(arr + 144, b2);
+    _mm512_store_epi32(arr + 160, c2); _mm512_store_epi32(arr + 176, d2);
+    _mm512_store_epi32(arr + 192, a3); _mm512_store_epi32(arr + 208, b3);
+    _mm512_store_epi32(arr + 224, c3); _mm512_store_epi32(arr + 240, d3);
+
+    // Final merge: 32→64 for each of the 4 blocks
+    uint32_t temp[64] __attribute__((aligned(64)));
+    merge_arrays(arr,       32, arr + 32,  32, temp); memcpy(arr,       temp, 64 * sizeof(uint32_t));
+    merge_arrays(arr + 64,  32, arr + 96,  32, temp); memcpy(arr + 64,  temp, 64 * sizeof(uint32_t));
+    merge_arrays(arr + 128, 32, arr + 160, 32, temp); memcpy(arr + 128, temp, 64 * sizeof(uint32_t));
+    merge_arrays(arr + 192, 32, arr + 224, 32, temp); memcpy(arr + 192, temp, 64 * sizeof(uint32_t));
+}
+
+// Base case threshold - 256 for batched SIMD with better ILP
+#define SORT_THRESHOLD 256
 
 // L3 cache size: 32 MiB = 8M uint32_t elements
 // Sort entire chunks of this size before moving on (cache locality optimization)
@@ -265,16 +632,20 @@ static inline double get_time_sec() {
 // Sort a single chunk with ALL threads collaborating (cache-friendly)
 // All threads work on the SAME chunk, keeping data hot in L3 cache
 static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
-    // Step 1: Base case sort (64-element chunks) - PARALLEL within chunk
-    size_t num_64_blocks = chunk_size / 64;
-    size_t remainder_start = num_64_blocks * 64;
+    // Step 1: Base case sort using batched 256-element blocks for better ILP
+    size_t num_256_blocks = chunk_size / 256;
+    size_t remainder_start = num_256_blocks * 256;
     
     #pragma omp parallel for schedule(static)
-    for (size_t b = 0; b < num_64_blocks; b++) {
-        sort_64_simd(arr + b * 64);
+    for (size_t b = 0; b < num_256_blocks; b++) {
+        sort_256_simd(arr + b * 256);
     }
     
-    // Handle remainder (single thread, small work)
+    // Handle remainder with smaller sorts
+    while (remainder_start + 64 <= chunk_size) {
+        sort_64_simd(arr + remainder_start);
+        remainder_start += 64;
+    }
     if (remainder_start + 32 <= chunk_size) {
         sort_32_simd(arr + remainder_start);
         remainder_start += 32;
@@ -327,8 +698,12 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
 
 // Original single-threaded version (for comparison or fallback)
 static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
-    // Step 1: Base case sort (64-element chunks)
+    // Step 1: Base case sort using batched 256-element blocks
     size_t i = 0;
+    for (; i + 256 <= chunk_size; i += 256) {
+        sort_256_simd(arr + i);
+    }
+    // Handle remainder
     for (; i + 64 <= chunk_size; i += 64) {
         sort_64_simd(arr + i);
     }
@@ -408,7 +783,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         sort_chunk_parallel(arr + start, chunk_size, temp + start);
     }
     t_end = get_time_sec();
-    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
+    printf("  [Phase 1] Sort %zu L3 chunks (4M elements each): %.3f sec (%d threads, cache-focused)\n", 
            num_chunks, t_end - t_start, NUM_THREADS);
     
     // ========== Phase 2: Merge L3-sized chunks together (PARALLEL) ==========
@@ -457,12 +832,16 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             dst = swap;
         }
         
-        // Copy result back to arr if needed
+        // Copy result back to arr if needed - PARALLEL copy for speed
         if (src != arr) {
             t_start = get_time_sec();
-            memcpy(arr, src, size * sizeof(uint32_t));
+            #pragma omp parallel for schedule(static)
+            for (size_t i = 0; i < size; i += 65536) {
+                size_t chunk = (i + 65536 <= size) ? 65536 : (size - i);
+                memcpy(arr + i, src + i, chunk * sizeof(uint32_t));
+            }
             t_end = get_time_sec();
-            printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
+            printf("  [Final ] Copy back: %.3f sec (parallel)\n", t_end - t_start);
         }
     }
     
