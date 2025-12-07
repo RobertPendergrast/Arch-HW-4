@@ -41,110 +41,145 @@ static const int SORT_SWAP8_IDX[16] __attribute__((aligned(64))) =
     {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};  // distance 8: swap i <-> i^8
 
 /*
- * Bitonic sort for 16 uint32_t elements in a single __m512i register.
- * 
- * Uses standard bitonic sorting network structure:
- * - Compare-swap at distance d, where d = 2^k for each stage
- * - Alternating directions to build bitonic sequences, then final merge
+ * Inline sort_16 that accepts pre-loaded shuffle indices.
+ * OPTIMIZATION: Avoids 4 memory loads per call when indices are hoisted.
  */
-static inline __m512i sort_16_simd(__m512i v) {
-    // Load shuffle indices for distance-d swaps
-    const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);  // i <-> i^1
-    const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);  // i <-> i^2
-    const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);  // i <-> i^4
-    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);  // i <-> i^8
-    
+static inline __m512i sort_16_inline(
+    __m512i v,
+    const __m512i swap1,
+    const __m512i swap2,
+    const __m512i swap4,
+    const __m512i swap8
+) {
     __m512i t, lo, hi;
     
     // ========== Stage 1: Sort pairs (distance 1) ==========
-    // Compare (0,1), (2,3), (4,5), ... with alternating directions
-    // Pairs at 0,4,8,12: ascending (bit pattern: keep min at lower index)
-    // Pairs at 2,6,10,14: descending (keep max at lower index)
-    // This creates bitonic sequences of length 4
     t = _mm512_permutexvar_epi32(swap1, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Positions: 0=lo,1=hi, 2=hi,3=lo, 4=lo,5=hi, 6=hi,7=lo, ...
-    // Mask where bit=1 means take hi: 0110 0110 0110 0110 = 0x6666
     v = _mm512_mask_blend_epi32(0x6666, lo, hi);
     
     // ========== Stage 2: Merge into sorted 4s ==========
-    // Step 2a: distance 2
     t = _mm512_permutexvar_epi32(swap2, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Groups 0-3,8-11: ascending (lo at 0,1; hi at 2,3)
-    // Groups 4-7,12-15: descending (hi at 4,5; lo at 6,7)
-    // Mask: 1100 0011 1100 0011 = 0xC3C3
     v = _mm512_mask_blend_epi32(0xC3C3, lo, hi);
     
-    // Step 2b: distance 1
     t = _mm512_permutexvar_epi32(swap1, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Groups 0-3,8-11: ascending (10 10 pattern)
-    // Groups 4-7,12-15: descending (01 01 pattern)
-    // Mask: 1010 0101 1010 0101 = 0xA5A5
     v = _mm512_mask_blend_epi32(0xA5A5, lo, hi);
     
     // ========== Stage 3: Merge into sorted 8s ==========
-    // Step 3a: distance 4
     t = _mm512_permutexvar_epi32(swap4, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Group 0-7: ascending (lo at 0-3, hi at 4-7) -> 11110000 = 0xF0
-    // Group 8-15: descending (hi at 8-11, lo at 12-15) -> 00001111 = 0x0F
-    // Mask: 0000 1111 1111 0000 = 0x0FF0
     v = _mm512_mask_blend_epi32(0x0FF0, lo, hi);
     
-    // Step 3b: distance 2
     t = _mm512_permutexvar_epi32(swap2, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Group 0-7: ascending -> 1100 1100 = 0xCC
-    // Group 8-15: descending -> 0011 0011 = 0x33
-    // Mask: 0011 0011 1100 1100 = 0x33CC
     v = _mm512_mask_blend_epi32(0x33CC, lo, hi);
     
-    // Step 3c: distance 1
     t = _mm512_permutexvar_epi32(swap1, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Group 0-7: ascending -> 1010 1010 = 0xAA
-    // Group 8-15: descending -> 0101 0101 = 0x55
-    // Mask: 0101 0101 1010 1010 = 0x55AA
     v = _mm512_mask_blend_epi32(0x55AA, lo, hi);
     
     // ========== Stage 4: Final merge into sorted 16 (all ascending) ==========
-    // Step 4a: distance 8
     t = _mm512_permutexvar_epi32(swap8, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Ascending: lo at 0-7, hi at 8-15 -> mask = 0xFF00
     v = _mm512_mask_blend_epi32(0xFF00, lo, hi);
     
-    // Step 4b: distance 4
     t = _mm512_permutexvar_epi32(swap4, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Ascending in both halves: 11110000 11110000 = 0xF0F0
     v = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
     
-    // Step 4c: distance 2
     t = _mm512_permutexvar_epi32(swap2, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Ascending: 1100 1100 1100 1100 = 0xCCCC
     v = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
     
-    // Step 4d: distance 1
     t = _mm512_permutexvar_epi32(swap1, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    // Ascending: 1010 1010 1010 1010 = 0xAAAA
     v = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
     
     return v;
+}
+
+/*
+ * Inline merge_32 that accepts pre-loaded shuffle indices.
+ * Merges two sorted 16-element registers into one sorted 32-element sequence.
+ */
+static inline void merge_32_inline(
+    __m512i *a, __m512i *b,
+    const __m512i idx_rev,
+    const __m512i idx_swap8,
+    const __m512i idx_swap4
+) {
+    // Reverse b to form bitonic sequence
+    *b = _mm512_permutexvar_epi32(idx_rev, *b);
+
+    // Compare-swap across registers
+    __m512i lo = _mm512_min_epu32(*a, *b);
+    __m512i hi = _mm512_max_epu32(*a, *b);
+    *a = lo;
+    *b = hi;
+
+    // Bitonic clean both registers: distances 8,4,2,1
+    // Distance 8
+    __m512i a_shuf = _mm512_permutexvar_epi32(idx_swap8, *a);
+    __m512i b_shuf = _mm512_permutexvar_epi32(idx_swap8, *b);
+    lo = _mm512_min_epu32(*a, a_shuf);
+    hi = _mm512_max_epu32(*a, a_shuf);
+    *a = _mm512_mask_blend_epi32(0xFF00, lo, hi);
+    lo = _mm512_min_epu32(*b, b_shuf);
+    hi = _mm512_max_epu32(*b, b_shuf);
+    *b = _mm512_mask_blend_epi32(0xFF00, lo, hi);
+
+    // Distance 4
+    a_shuf = _mm512_permutexvar_epi32(idx_swap4, *a);
+    b_shuf = _mm512_permutexvar_epi32(idx_swap4, *b);
+    lo = _mm512_min_epu32(*a, a_shuf);
+    hi = _mm512_max_epu32(*a, a_shuf);
+    *a = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
+    lo = _mm512_min_epu32(*b, b_shuf);
+    hi = _mm512_max_epu32(*b, b_shuf);
+    *b = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
+
+    // Distance 2 (within-lane, no cross-lane permute needed)
+    a_shuf = _mm512_shuffle_epi32(*a, _MM_SHUFFLE(1,0,3,2));
+    b_shuf = _mm512_shuffle_epi32(*b, _MM_SHUFFLE(1,0,3,2));
+    lo = _mm512_min_epu32(*a, a_shuf);
+    hi = _mm512_max_epu32(*a, a_shuf);
+    *a = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
+    lo = _mm512_min_epu32(*b, b_shuf);
+    hi = _mm512_max_epu32(*b, b_shuf);
+    *b = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
+
+    // Distance 1
+    a_shuf = _mm512_shuffle_epi32(*a, _MM_SHUFFLE(2,3,0,1));
+    b_shuf = _mm512_shuffle_epi32(*b, _MM_SHUFFLE(2,3,0,1));
+    lo = _mm512_min_epu32(*a, a_shuf);
+    hi = _mm512_max_epu32(*a, a_shuf);
+    *a = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
+    lo = _mm512_min_epu32(*b, b_shuf);
+    hi = _mm512_max_epu32(*b, b_shuf);
+    *b = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
+}
+
+/*
+ * Public wrapper for sort_16 (loads indices internally, for external callers).
+ */
+static inline __m512i sort_16_simd(__m512i v) {
+    const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
+    const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
+    const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
+    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
+    return sort_16_inline(v, swap1, swap2, swap4, swap8);
 }
 
 /*
@@ -168,16 +203,42 @@ static inline void sort_32_simd(uint32_t *arr) {
 }
 
 /*
- * Sort 64 elements using SIMD: sort four 16-element chunks, then merge.
+ * OPTIMIZED: Sort 64 elements with all shuffle indices loaded ONCE.
+ * Eliminates ~25 redundant memory loads per call vs the nested version.
  * Requires arr to be 64-byte aligned.
  */
 static inline void sort_64_simd(uint32_t *arr) {
-    // Sort each 32-element half
-    sort_32_simd(arr);
-    sort_32_simd(arr + 32);
-    
+    // Load ALL shuffle indices ONCE (sort needs swap1-4-8, merge needs rev-swap8-swap4)
+    const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
+    const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
+    const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
+    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+
+    // Load all 4 chunks
+    __m512i a = _mm512_load_epi32(arr);
+    __m512i b = _mm512_load_epi32(arr + 16);
+    __m512i c = _mm512_load_epi32(arr + 32);
+    __m512i d = _mm512_load_epi32(arr + 48);
+
+    // Sort each 16-element chunk using pre-loaded indices
+    a = sort_16_inline(a, swap1, swap2, swap4, swap8);
+    b = sort_16_inline(b, swap1, swap2, swap4, swap8);
+    c = sort_16_inline(c, swap1, swap2, swap4, swap8);
+    d = sort_16_inline(d, swap1, swap2, swap4, swap8);
+
+    // Merge into two 32-element sorted sequences
+    // Note: swap4 == SORT_SWAP4_IDX, but IDX_SWAP4 from merge.h has same values
+    merge_32_inline(&a, &b, idx_rev, swap8, swap4);
+    merge_32_inline(&c, &d, idx_rev, swap8, swap4);
+
+    // Store temporary results for final merge
+    _mm512_store_epi32(arr, a);
+    _mm512_store_epi32(arr + 16, b);
+    _mm512_store_epi32(arr + 32, c);
+    _mm512_store_epi32(arr + 48, d);
+
     // Merge the two 32-element sorted runs
-    // Use a 64-byte aligned temp buffer for cache-aligned SIMD operations
     uint32_t temp[64] __attribute__((aligned(64)));
     merge_arrays(arr, 32, arr + 32, 32, temp);
     memcpy(arr, temp, 64 * sizeof(uint32_t));

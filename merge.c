@@ -88,29 +88,23 @@ const int IDX_REV[16] __attribute__((aligned(64))) = {15,14,13,12,11,10,9,8,7,6,
 const int IDX_SWAP8[16] __attribute__((aligned(64))) = {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};
 const int IDX_SWAP4[16] __attribute__((aligned(64))) = {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};
 
-inline __attribute__((always_inline)) void merge_512_registers(
+// Inline version that accepts pre-loaded indices to avoid repeated memory loads
+static inline __attribute__((always_inline)) void merge_512_inline(
     __m512i *left,
-    __m512i *right
+    __m512i *right,
+    const __m512i idx_rev,
+    const __m512i idx_swap8,
+    const __m512i idx_swap4
 ) {
-    // Load shuffle indices from shared arrays
-    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
-
     // Step 0: Reverse right register to form bitonic sequence
     *right = _mm512_permutexvar_epi32(idx_rev, *right);
 
     // Step 1: Compare-swap across registers (distance 16)
-    // After this, left has smaller elements, right has larger elements
-    // NOTE: Using epu32 (unsigned) for correct comparison of uint32_t values!
     __m512i lo = _mm512_min_epu32(*left, *right);
     __m512i hi = _mm512_max_epu32(*left, *right);
     *left = lo;
     *right = hi;
 
-    // Now each register needs independent bitonic clean (distances 8,4,2,1)
-    // We process both registers in parallel for better instruction-level parallelism
-    
     // Step 2: Distance 8 - compare elements i with i+8
     __m512i left_shuf = _mm512_permutexvar_epi32(idx_swap8, *left);
     __m512i right_shuf = _mm512_permutexvar_epi32(idx_swap8, *right);
@@ -135,9 +129,7 @@ inline __attribute__((always_inline)) void merge_512_registers(
     hi = _mm512_max_epu32(*right, right_shuf);
     *right = _mm512_mask_blend_epi32(_512_BLEND_4, lo, hi);
 
-    // Step 4: Distance 2 - compare elements i with i+2 within each group of 4
-    // Can use within-lane shuffle (faster than cross-lane permute)
-    // _MM_SHUFFLE(1,0,3,2) swaps pairs: [0,1,2,3] -> [2,3,0,1]
+    // Step 4: Distance 2 - within-lane shuffle (faster than cross-lane permute)
     left_shuf = _mm512_shuffle_epi32(*left, _MM_SHUFFLE(1,0,3,2));
     right_shuf = _mm512_shuffle_epi32(*right, _MM_SHUFFLE(1,0,3,2));
     
@@ -150,7 +142,6 @@ inline __attribute__((always_inline)) void merge_512_registers(
     *right = _mm512_mask_blend_epi32(_512_BLEND_2, lo, hi);
 
     // Step 5: Distance 1 - compare adjacent elements
-    // _MM_SHUFFLE(2,3,0,1) swaps adjacent: [0,1,2,3] -> [1,0,3,2]
     left_shuf = _mm512_shuffle_epi32(*left, _MM_SHUFFLE(2,3,0,1));
     right_shuf = _mm512_shuffle_epi32(*right, _MM_SHUFFLE(2,3,0,1));
     
@@ -161,6 +152,17 @@ inline __attribute__((always_inline)) void merge_512_registers(
     lo = _mm512_min_epu32(*right, right_shuf);
     hi = _mm512_max_epu32(*right, right_shuf);
     *right = _mm512_mask_blend_epi32(_512_BLEND_1, lo, hi);
+}
+
+// Public wrapper that loads indices (for external callers)
+inline __attribute__((always_inline)) void merge_512_registers(
+    __m512i *left,
+    __m512i *right
+) {
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
+    merge_512_inline(left, right, idx_rev, idx_swap8, idx_swap4);
 }
 
 void merge_local(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
@@ -196,10 +198,15 @@ void merge_arrays(
         return;
     }
 
+    // OPTIMIZATION: Load shuffle indices ONCE before the loop
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
+
     // Load from left and right arrays (aligned for cache efficiency)
     __m512i left_reg = _mm512_load_epi32((__m512i*) left);
     __m512i right_reg = _mm512_load_epi32((__m512i*) right);
-    merge_512_registers(&left_reg, &right_reg);
+    merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
     _mm512_store_epi32(arr, left_reg);
     
     size_t right_idx = 16;
@@ -228,7 +235,8 @@ void merge_arrays(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        merge_512_registers(&left_reg, &right_reg);
+        // Use inline version with pre-loaded indices (avoids 3 memory loads per iteration)
+        merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
         _mm512_store_epi32(arr + left_idx + right_idx - 32, left_reg);
     }
     
