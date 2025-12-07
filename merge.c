@@ -241,18 +241,21 @@ void merge_arrays(
     if (remainder_size == 0) {
         // No remainders - just output the pending 16
         _mm512_storeu_epi32(arr + output_pos, right_reg);
-    } else if (remainder_size <= 30) {
-        // Small remainders - use stack buffer (both sides have < 16 elements)
-        uint32_t remainder_merged[32];
-        merge_local(left + left_idx, right + right_idx, remainder_merged,
-                    left_remaining, right_remaining);
-        merge_local(pending, remainder_merged, arr + output_pos, 16, remainder_size);
     } else {
-        // Large remainder - one side exhausted early, use heap allocation
-        uint32_t *remainder_merged = (uint32_t*)malloc(remainder_size * sizeof(uint32_t));
-        merge_local(left + left_idx, right + right_idx, remainder_merged,
-                    left_remaining, right_remaining);
-        merge_local(pending, remainder_merged, arr + output_pos, 16, remainder_size);
-        free(remainder_merged);
+        // Stack buffer - max 30 elements (15 from each side worst case)
+        uint32_t remainder_merged[32];
+        
+        // Merge the two remainders
+        if(left_remaining < right_remaining) {
+            merge_local(left + left_idx, pending, remainder_merged, 
+              left_remaining, 16);
+            merge_local(remainder_merged, right + right_idx, arr + output_pos, 
+              left_remaining + 16, right_remaining);
+        } else {
+            merge_local(right + right_idx, pending, remainder_merged, 
+              right_remaining, 16);
+            merge_local(remainder_merged, left + left_idx, arr + output_pos, 
+              right_remaining + 16, left_remaining);
+        }
     }
 }
