@@ -99,6 +99,8 @@ void merge_512_registers(
     print_512_num(H2);
     __m512i L2p = _mm512_mask_blend_epi32(_512_BLEND_2, L2, H2);
     __m512i H2p = _mm512_mask_blend_epi32(_512_BLEND_2, H2, L2);
+    print_512_num(L2);
+    print_512_num(H2);
     __m512i _512_SHUFFLE_2 = _mm512_set_epi32(
         11, 10, 9, 8, 15, 14, 13, 12, 3 , 2 , 1, 0, 7, 6, 5, 4
     );
