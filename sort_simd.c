@@ -446,7 +446,9 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
-                teh
+                
+                // Skip if this pair starts beyond array
+                if (left_start >= size) continue;
                 
                 size_t left_size = (left_start + width <= size) ? width : (size - left_start);
                 size_t right_start = left_start + left_size;
@@ -467,7 +469,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             int threads_used = (num_pairs < NUM_THREADS) ? (int)num_pairs : NUM_THREADS;
             printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %d threads, %.2f GB/s)\n", 
                    width, t_end - t_start, num_pairs, threads_used, throughput);
-                   teh
+            
             // Swap src and dst
             uint32_t *swap = src;
             src = dst;
