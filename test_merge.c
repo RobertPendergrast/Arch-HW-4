@@ -445,6 +445,116 @@ int test_merge_arrays_edge_sizes() {
     return 0;
 }
 
+// ============== Full Sort Tests ==============
+
+// Copy of insertion_sort from sort_simd.c
+void insertion_sort_test(uint32_t *arr, size_t size) {
+    for (size_t i = 1; i < size; i++) {
+        uint32_t key = arr[i];
+        size_t j = i;
+        while (j > 0 && arr[j - 1] > key) {
+            arr[j] = arr[j - 1];
+            j--;
+        }
+        arr[j] = key;
+    }
+}
+
+#define SORT_THRESHOLD_TEST 32
+
+void basic_merge_sort_test(uint32_t *arr, size_t size) {
+    if (size <= SORT_THRESHOLD_TEST) {
+        insertion_sort_test(arr, size);
+        return;
+    }
+    size_t middle = size / 2;
+    size_t size_left = middle;
+    size_t size_right = size - middle;
+
+    uint32_t* left = NULL;
+    uint32_t* right = NULL;
+    if (posix_memalign((void**)&left, 64, size_left * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "posix_memalign failed for left array\n");
+        exit(EXIT_FAILURE);
+    }
+    if (posix_memalign((void**)&right, 64, size_right * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "posix_memalign failed for right array\n");
+        free(left);
+        exit(EXIT_FAILURE);
+    }
+
+    memcpy(left, arr, size_left * sizeof(uint32_t));
+    memcpy(right, arr + middle, size_right * sizeof(uint32_t));
+
+    basic_merge_sort_test(left, size_left);
+    basic_merge_sort_test(right, size_right);
+
+    merge_arrays(left, size_left, right, size_right, arr);
+    free(left);
+    free(right);
+}
+
+// Comparison function for qsort
+int compare_uint32(const void *a, const void *b) {
+    uint32_t ua = *(const uint32_t*)a;
+    uint32_t ub = *(const uint32_t*)b;
+    return (ua > ub) - (ua < ub);
+}
+
+int test_full_sort() {
+    printf("  Testing full merge sort with various sizes:\n");
+    int pass = 1;
+    
+    // Test sizes
+    size_t sizes[] = {10, 32, 33, 64, 100, 128, 256, 500, 1000, 5000, 10000};
+    int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+    
+    for (int si = 0; si < num_sizes && pass; si++) {
+        size_t size = sizes[si];
+        printf("    Size %zu: ", size);
+        
+        uint32_t *arr = malloc(size * sizeof(uint32_t));
+        uint32_t *copy = malloc(size * sizeof(uint32_t));
+        
+        // Generate random data
+        for (size_t i = 0; i < size; i++) {
+            arr[i] = rand();
+            copy[i] = arr[i];
+        }
+        
+        // Sort using our merge sort
+        basic_merge_sort_test(arr, size);
+        
+        // Verify sorted
+        if (!is_sorted(arr, size)) {
+            printf("FAILED - not sorted!\n");
+            // Find first error
+            for (size_t i = 1; i < size; i++) {
+                if (arr[i-1] > arr[i]) {
+                    printf("      First error at index %zu: %u > %u\n", i, arr[i-1], arr[i]);
+                    break;
+                }
+            }
+            pass = 0;
+        } else {
+            // Verify all elements present (sort the copy with qsort and compare)
+            qsort(copy, size, sizeof(uint32_t), compare_uint32);
+            
+            if (memcmp(arr, copy, size * sizeof(uint32_t)) != 0) {
+                printf("FAILED - wrong elements!\n");
+                pass = 0;
+            } else {
+                printf("PASSED\n");
+            }
+        }
+        
+        free(arr);
+        free(copy);
+    }
+    
+    return pass;
+}
+
 // ============== Main ==============
 
 int main(int argc, char *argv[]) {
@@ -468,6 +578,9 @@ int main(int argc, char *argv[]) {
     tests_passed += test_merge_arrays_large();
     tests_passed += test_merge_arrays_random_large();
     tests_passed += test_merge_arrays_edge_sizes();
+    
+    printf("\n====== Full Sort Tests ======\n");
+    tests_passed += test_full_sort();
     
     printf("\n====== Summary ======\n");
     int total = tests_passed + tests_failed;
