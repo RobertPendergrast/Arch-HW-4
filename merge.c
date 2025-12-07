@@ -86,7 +86,11 @@ void merge_512_registers(
     __m512i H1 = _mm512_max_epi32(*left, *right);
     //Shuffle
     __m512i L1p = _mm512_mask_blend_epi32(_512_BLEND_1, L1, H1);
-    __m512i H1p = _mm512_mask_blend_epi32(_512_BLEND_1, H1, H1);
+    __m512i H1p = _mm512_mask_blend_epi32(_512_BLEND_1, H1, L1);
+    __m512i _512_SHUFFLE_1 = _mm512_set_epi32(
+        7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8
+    );
+    H1p = _mm512_permutexvar_epi32(_512_SHUFFLE_1, H1p);
     print_512_num(L1p);
     print_512_num(H1p);
     // Level 2
