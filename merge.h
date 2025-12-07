@@ -24,5 +24,11 @@ void merge_512_registers(
     __m512i *right
 );
 
-
+void merge_arrays(
+    uint32_t *left,
+    size_t size_left,
+    uint32_t *riWWght,
+    size_t size_right,
+    uint32_t *arr
+);
 #endif

@@ -48,6 +48,16 @@ void run_512(){
     print_512_num(right_reg);
 }
 
+void run_merge_arrays(){
+    uint32_t left[] = {1, 4, 6, 7, 8, 12, 17, 18, 19, 20, 21, 23, 24 ,25, 27, 30};
+    uint32_t right[] = {2, 3, 5, 9, 10, 11, 13, 14, 15, 16, 22, 26, 28, 29, 31, 32};
+    uint32_t arr[32];
+    merge_arrays(left, 16, right, 16, arr);
+    printf("After: \n");
+    printf("Arr: \n");
+    print_array(arr, 32);
+}
+
 int main(int argc, char *argv[]) {
     run_512();
 }

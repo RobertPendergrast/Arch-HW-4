@@ -1,7 +1,7 @@
 #include "merge.h"
 #include "utils.h"
 #include <stdio.h>
-
+#include <string.h>
 // 128 Constants
 // Control to reverse. First two bits (11) means the new first value is the old
 // last value, etc...
@@ -177,7 +177,7 @@ void merge_arrays(
     _mm512_storeu_epi32(arr, left_reg);
     int right_idx = 16;
     int left_idx = 16;
-    while(left_idx + 16 < size_left && right_idx + 16 < size_right) {
+    while(left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
         if(left[left_idx] <= right[right_idx]) {
             left_reg = _mm512_loadu_epi32(left + left_idx);
             left_idx += 16;
@@ -189,60 +189,39 @@ void merge_arrays(
         merge_512_registers(&left_reg, &right_reg);
         _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
     }
-    //doing a standerd merge of the remaining in left, right, and right_reg
-    //cast right_reg to a array of uint32_t
-    // the last element of right reg will be smaller than the first element if either left or right, so put it in that array before the counter and merge from there
-    if(right_reg[15] < left[left_idx]) {
-        //merging it with right
-        int reg_idx = 0;
+    if(left_idx == size_left) {
+        while(right_idx + 16 <= size_right) {
+            right_reg = _mm512_loadu_epi32(right + right_idx);
+            right_idx += 16;
+            merge_512_registers(&left_reg, &right_reg);
+            _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
+            if(right[right_idx] >= right_reg[15]) {
+                //memcpy the rest and break
+                _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
+                memcpy(arr + left_idx + right_idx, right + right_idx, (size_right - right_idx) * sizeof(uint32_t));
+                break;
+            }
+                
 
-        while(reg_idx < 16 && right_idx < size_right) {
-            if(right_reg[reg_idx] < left[left_idx]) {
-                arr[left_idx + right_idx] = right_reg[reg_idx];
-                reg_idx++;
-            }
-            else {
-                arr[left_idx + right_idx] = left[left_idx];
-                left_idx++;
-            }
-        }
-        if(reg_idx < 16){
-            while(reg_idx < 16) {
-                arr[left_idx + right_idx] = right_reg[reg_idx];
-                reg_idx++;
-            }
-            while(left_idx < size_left) {
-                arr[left_idx + right_idx] = left[left_idx];
-                left_idx++;
-            }
-        }
-        else{
-            merge(left + left_idx, right + right_idx, arr + left_idx + right_idx, size_left - left_idx, size_right - right_idx);
         }
     }
-    else {
-        //merging it with left
-        int reg_idx = 0;
-        while(reg_idx < 16 && left_idx < size_left) {
-            if(left[left_idx] < right_reg[reg_idx]) {
-                arr[left_idx + right_idx] = left[left_idx];
-                left_idx++;
+    else if(right_idx == size_right) {
+        while(left_idx + 16 <= size_left) {
+            left_reg = _mm512_loadu_epi32(left + left_idx);
+            left_idx += 16;
+            merge_512_registers(&left_reg, &right_reg);
+            _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
+            if(left[left_idx] >= left_reg[15]) {
+                //memcpy the rest and break
+                _mm512_storeu_epi32(arr + left_idx + right_idx - 16, left_reg);
+                memcpy(arr + left_idx + right_idx, left + left_idx, (size_left - left_idx) * sizeof(uint32_t));
+                break;
             }
-        }
-        if(reg_idx < 16){
-            while(reg_idx < 16) {
-                arr[left_idx + right_idx] = right_reg[reg_idx];
-                reg_idx++;
-            }
-            while(right_idx < size_right) {
-                arr[left_idx + right_idx] = right[right_idx];
-                right_idx++;
-            }
-        }
-        else{
-            merge(left + left_idx, right + right_idx, arr + left_idx + right_idx, size_left - left_idx, size_right - right_idx);
         }
     }
-
+    else{
+        fprintf(stderr, "Error: Arrays are not cache line aligned for merge. Exiting.\n");
+        exit(1);
+    }
      
 }
