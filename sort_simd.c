@@ -35,8 +35,10 @@ static const int SORT_SWAP1_IDX[16] __attribute__((aligned(64))) =
     {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};  // swap adjacent pairs
 static const int SORT_SWAP2_IDX[16] __attribute__((aligned(64))) = 
     {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};  // reverse within groups of 4
+static const int SORT_SWAP4_IDX[16] __attribute__((aligned(64))) = 
+    {7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8};  // reverse within groups of 8
 
-// IDX_REV (full reverse) and IDX_SWAP4 are imported from merge.h
+// IDX_REV (full reverse) is imported from merge.h - same as swap8
 
 /*
  * Bitonic sort for 16 uint32_t elements in a single __m512i register.
@@ -47,7 +49,7 @@ static inline __m512i sort_16_simd(__m512i v) {
     const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
     const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
     const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
-    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
+    const __m512i swap8 = _mm512_load_epi32(IDX_REV);  // full reverse, shared with merge.c
     
     __m512i t, lo, hi;
     
