@@ -207,22 +207,11 @@ static inline void sort_256_simd(uint32_t *arr) {
 // Base case threshold - larger = fewer slow small-merge passes
 #define SORT_THRESHOLD 256
 
-// Helper for timing
-static inline double get_time_sec() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
 // Bottom-up merge sort: O(1) allocations instead of O(N) allocations!
 void basic_merge_sort(uint32_t *arr, size_t size) {
     if (size <= 1) return;
     
-    double t_start, t_end;
-    int pass_num = 0;
-    
     // Step 1: Sort all base-case chunks in place using SIMD
-    t_start = get_time_sec();
     size_t i = 0;
     
     // Process full 256-element chunks with SIMD
@@ -252,9 +241,6 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     if (i < size) {
         insertion_sort(arr + i, size - i);
     }
-    t_end = get_time_sec();
-    printf("  [Pass %2d] Base case sort (chunks of %d): %.3f sec\n", 
-           pass_num++, SORT_THRESHOLD, t_end - t_start);
     
     // Step 2: Allocate ONE temp buffer for all merges
     uint32_t *temp = NULL;
@@ -269,9 +255,6 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     uint32_t *dst = temp;
     
     for (size_t width = SORT_THRESHOLD; width < size; width *= 2) {
-        t_start = get_time_sec();
-        size_t num_merges = 0;
-        
         // Merge adjacent pairs of runs
         size_t i = 0;
         while (i < size) {
@@ -292,16 +275,10 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
                 merge_arrays(src + left_start, left_size, 
                            src + right_start, right_size, 
                            dst + left_start);
-                num_merges++;
             }
             
             i = right_start + right_size;
         }
-        
-        t_end = get_time_sec();
-        double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-        printf("  [Pass %2d] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n", 
-               pass_num++, width, t_end - t_start, num_merges, throughput);
         
         // Swap src and dst for next pass
         uint32_t *swap = src;
@@ -311,10 +288,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     
     // If result ended up in temp, copy back to arr
     if (src != arr) {
-        t_start = get_time_sec();
         memcpy(arr, src, size * sizeof(uint32_t));
-        t_end = get_time_sec();
-        printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
     }
     
     free(temp);
