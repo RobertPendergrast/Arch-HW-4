@@ -221,6 +221,44 @@ int test_merge_512_random() {
     }
 }
 
+int test_merge_512_large_unsigned() {
+    printf("  test_merge_512_large_unsigned (values > 2^31): ");
+    
+    // Test with values that have high bit set (would be negative if treated as signed)
+    uint32_t left[16], right[16];
+    uint32_t base = 0x80000000;  // 2^31
+    for (int i = 0; i < 16; i++) {
+        left[i] = base + i * 2;      // Even: 2^31, 2^31+2, ...
+        right[i] = base + i * 2 + 1; // Odd: 2^31+1, 2^31+3, ...
+    }
+    
+    __m512i left_reg = _mm512_loadu_epi32(left);
+    __m512i right_reg = _mm512_loadu_epi32(right);
+    
+    merge_512_registers(&left_reg, &right_reg);
+    
+    uint32_t result_left[16], result_right[16];
+    _mm512_storeu_epi32(result_left, left_reg);
+    _mm512_storeu_epi32(result_right, right_reg);
+    
+    // Should be sorted: 2^31, 2^31+1, 2^31+2, ..., 2^31+31
+    int pass = 1;
+    for (int i = 0; i < 16; i++) {
+        if (result_left[i] != base + i) pass = 0;
+        if (result_right[i] != base + 16 + i) pass = 0;
+    }
+    
+    if (pass) { printf("PASSED\n"); return 1; }
+    else {
+        printf("FAILED\n");
+        printf("    Result Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
+        printf("    Expected:     "); for(int i=0; i<16; i++) printf("%u ", base + i); printf("\n");
+        printf("    Result Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
+        printf("    Expected:     "); for(int i=0; i<16; i++) printf("%u ", base + 16 + i); printf("\n");
+        return 0;
+    }
+}
+
 // ============== merge_arrays Tests ==============
 
 int test_merge_arrays_16_16() {
@@ -565,6 +603,7 @@ int main(int argc, char *argv[]) {
     tests_passed += test_merge_512_already_partitioned();
     tests_passed += test_merge_512_reversed();
     tests_passed += test_merge_512_duplicates();
+    tests_passed += test_merge_512_large_unsigned();  // Test values > 2^31
     for (int i = 0; i < 5; i++) {
         tests_passed += test_merge_512_random();
     }

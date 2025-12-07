@@ -38,9 +38,9 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         insertion_sort(arr, size);
         return;
     }
-    int middle = size / 2;
-    int size_left = middle;
-    int size_right = size - middle;
+    size_t middle = size / 2;
+    size_t size_left = middle;
+    size_t size_right = size - middle;
 
     // Ensure left and right arrays are cache line aligned (typically 64 bytes)
     uint32_t* left = NULL;

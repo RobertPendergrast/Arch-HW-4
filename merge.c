@@ -25,37 +25,33 @@ const int _128_SHUFFLE_3_H = 0b01110010;
 
 /*
  * Takes in two m128i registers and merges them in place.
+ * NOTE: Uses unsigned comparison (epu32) for correct uint32_t sorting!
  */
 void merge_128_registers(
     __m128i *left,
     __m128i *right
 ) {
-    // Reverse the *right register
-
-    // Level 1
-    // Get min/max values
-    __m128i L1 = _mm_min_epi32(*left, *right);
-    __m128i H1 = _mm_max_epi32(*left, *right);
+    // Level 1 - Get min/max values (unsigned comparison)
+    __m128i L1 = _mm_min_epu32(*left, *right);
+    __m128i H1 = _mm_max_epu32(*left, *right);
 
     // Shuffle
     __m128i L1p = _mm_blend_epi32(L1, H1, _128_BLEND_1);
     __m128i H1p = _mm_blend_epi32(H1, L1, _128_BLEND_1);
     H1p = _mm_shuffle_epi32(H1p, _128_SHUFFLE_1);
 
-    // Level 2
-    // Get min/max values
-    __m128i L2 = _mm_min_epi32(L1p, H1p);
-    __m128i H2 = _mm_max_epi32(L1p, H1p);
+    // Level 2 - Get min/max values (unsigned comparison)
+    __m128i L2 = _mm_min_epu32(L1p, H1p);
+    __m128i H2 = _mm_max_epu32(L1p, H1p);
 
     // Shuffle
     __m128i L2p = _mm_blend_epi32(L2, H2, _128_BLEND_2);
     __m128i H2p = _mm_blend_epi32(H2, L2, _128_BLEND_2);
     H2p = _mm_shuffle_epi32(H2p, _128_SHUFFLE_2);
 
-    // Level 3
-    // Get min/max values
-    __m128i L3 = _mm_min_epi32(L2p, H2p);
-    __m128i H3 = _mm_max_epi32(L2p, H2p);
+    // Level 3 - Get min/max values (unsigned comparison)
+    __m128i L3 = _mm_min_epu32(L2p, H2p);
+    __m128i H3 = _mm_max_epu32(L2p, H2p);
 
     //Shuffle
     __m128i H3p =  _mm_shuffle_epi32(H3, _128_SHUFFLE_3);
@@ -64,8 +60,7 @@ void merge_128_registers(
     H3p = _mm_shuffle_epi32(H3p, _128_SHUFFLE_3_H);
     L3p = _mm_shuffle_epi32(L3p, _128_SHUFFLE_3_L);
 
-    // Reset
-    // Note: This will eventually be removed by consolidating registers
+    // Output
     *left = L3p;
     *right = H3p;
 }
@@ -101,8 +96,9 @@ inline __attribute__((always_inline)) void merge_512_registers(
 
     // Step 1: Compare-swap across registers (distance 16)
     // After this, left has smaller elements, right has larger elements
-    __m512i lo = _mm512_min_epi32(*left, *right);
-    __m512i hi = _mm512_max_epi32(*left, *right);
+    // NOTE: Using epu32 (unsigned) for correct comparison of uint32_t values!
+    __m512i lo = _mm512_min_epu32(*left, *right);
+    __m512i hi = _mm512_max_epu32(*left, *right);
     *left = lo;
     *right = hi;
 
@@ -113,24 +109,24 @@ inline __attribute__((always_inline)) void merge_512_registers(
     __m512i left_shuf = _mm512_permutexvar_epi32(idx_swap8, *left);
     __m512i right_shuf = _mm512_permutexvar_epi32(idx_swap8, *right);
     
-    lo = _mm512_min_epi32(*left, left_shuf);
-    hi = _mm512_max_epi32(*left, left_shuf);
+    lo = _mm512_min_epu32(*left, left_shuf);
+    hi = _mm512_max_epu32(*left, left_shuf);
     *left = _mm512_mask_blend_epi32(_512_BLEND_8, lo, hi);
     
-    lo = _mm512_min_epi32(*right, right_shuf);
-    hi = _mm512_max_epi32(*right, right_shuf);
+    lo = _mm512_min_epu32(*right, right_shuf);
+    hi = _mm512_max_epu32(*right, right_shuf);
     *right = _mm512_mask_blend_epi32(_512_BLEND_8, lo, hi);
 
     // Step 3: Distance 4 - compare elements i with i+4 within each group of 8
     left_shuf = _mm512_permutexvar_epi32(idx_swap4, *left);
     right_shuf = _mm512_permutexvar_epi32(idx_swap4, *right);
     
-    lo = _mm512_min_epi32(*left, left_shuf);
-    hi = _mm512_max_epi32(*left, left_shuf);
+    lo = _mm512_min_epu32(*left, left_shuf);
+    hi = _mm512_max_epu32(*left, left_shuf);
     *left = _mm512_mask_blend_epi32(_512_BLEND_4, lo, hi);
     
-    lo = _mm512_min_epi32(*right, right_shuf);
-    hi = _mm512_max_epi32(*right, right_shuf);
+    lo = _mm512_min_epu32(*right, right_shuf);
+    hi = _mm512_max_epu32(*right, right_shuf);
     *right = _mm512_mask_blend_epi32(_512_BLEND_4, lo, hi);
 
     // Step 4: Distance 2 - compare elements i with i+2 within each group of 4
@@ -139,12 +135,12 @@ inline __attribute__((always_inline)) void merge_512_registers(
     left_shuf = _mm512_shuffle_epi32(*left, _MM_SHUFFLE(1,0,3,2));
     right_shuf = _mm512_shuffle_epi32(*right, _MM_SHUFFLE(1,0,3,2));
     
-    lo = _mm512_min_epi32(*left, left_shuf);
-    hi = _mm512_max_epi32(*left, left_shuf);
+    lo = _mm512_min_epu32(*left, left_shuf);
+    hi = _mm512_max_epu32(*left, left_shuf);
     *left = _mm512_mask_blend_epi32(_512_BLEND_2, lo, hi);
     
-    lo = _mm512_min_epi32(*right, right_shuf);
-    hi = _mm512_max_epi32(*right, right_shuf);
+    lo = _mm512_min_epu32(*right, right_shuf);
+    hi = _mm512_max_epu32(*right, right_shuf);
     *right = _mm512_mask_blend_epi32(_512_BLEND_2, lo, hi);
 
     // Step 5: Distance 1 - compare adjacent elements
@@ -152,12 +148,12 @@ inline __attribute__((always_inline)) void merge_512_registers(
     left_shuf = _mm512_shuffle_epi32(*left, _MM_SHUFFLE(2,3,0,1));
     right_shuf = _mm512_shuffle_epi32(*right, _MM_SHUFFLE(2,3,0,1));
     
-    lo = _mm512_min_epi32(*left, left_shuf);
-    hi = _mm512_max_epi32(*left, left_shuf);
+    lo = _mm512_min_epu32(*left, left_shuf);
+    hi = _mm512_max_epu32(*left, left_shuf);
     *left = _mm512_mask_blend_epi32(_512_BLEND_1, lo, hi);
     
-    lo = _mm512_min_epi32(*right, right_shuf);
-    hi = _mm512_max_epi32(*right, right_shuf);
+    lo = _mm512_min_epu32(*right, right_shuf);
+    hi = _mm512_max_epu32(*right, right_shuf);
     *right = _mm512_mask_blend_epi32(_512_BLEND_1, lo, hi);
 }
 
