@@ -83,9 +83,11 @@ const __mmask16 _512_BLEND_1  = 0xAAAA;  // alternating:         0b1010101010101
  * 3. Bitonic clean each register: distances 8, 4, 2, 1
  */
 // Static shuffle indices for cross-lane permutations (avoids recreating each call)
-static const int IDX_REV_ARR[16] __attribute__((aligned(64))) = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
-static const int IDX_SWAP8_ARR[16] __attribute__((aligned(64))) = {7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8};
-static const int IDX_SWAP4_ARR[16] __attribute__((aligned(64))) = {11,10,9,8,15,14,13,12,3,2,1,0,7,6,5,4};
+// Note: _mm512_set_epi32 takes args in reverse order (arg0=elem15, arg15=elem0)
+// So arrays are stored in memory order (elem0 first)
+static const int IDX_REV_ARR[16] __attribute__((aligned(64))) = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+static const int IDX_SWAP8_ARR[16] __attribute__((aligned(64))) = {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};
+static const int IDX_SWAP4_ARR[16] __attribute__((aligned(64))) = {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};
 
 inline __attribute__((always_inline)) void merge_512_registers(
     __m512i *left,
