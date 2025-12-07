@@ -188,13 +188,10 @@ void merge_arrays(
     size_t size_right,
     uint32_t *arr
 ) {
-    // For performance, try to make left and right cache line aligned, as well as arr
-    // Also, try to make the size_left and size_right cache line aligned, but we can handle if not
-    
-    //TODO: take this line out once done debugging
-    if(size_left < 16 || size_right < 16) {
-        fprintf(stderr, "Error: Arrays are too small to merge (size_left=%zu, size_right=%zu)\n", size_left, size_right);
-        exit(EXIT_FAILURE);
+    // Small arrays: fall back to scalar merge
+    if (size_left < 16 || size_right < 16) {
+        merge_local(left, right, arr, size_left, size_right);
+        return;
     }
 
     //creating a mm512i register from the left and right arrays

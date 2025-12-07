@@ -27,12 +27,12 @@ void insertion_sort(uint32_t *arr, size_t size) {
 }
 
 // Base case threshold: use insertion sort for arrays smaller than this
-#define SORT_THRESHOLD 32
+#define SORT_THRESHOLD 2
 
 void basic_merge_sort(uint32_t *arr, size_t size) {
     // Base case: use insertion sort for small arrays
     if (size <= SORT_THRESHOLD) {
-        insertion_sort(arr, size);
+        //insertion_sort(arr, size);
         return;
     }
     int middle = size / 2;
