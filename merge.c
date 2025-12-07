@@ -193,11 +193,11 @@ void merge_arrays(
         printf("Left is done, merging right\n");
         int done = 0;
         while(right_idx + 16 <= size_right) {
-            right_reg = _mm512_loadu_epi32(right + right_idx);
+            left_reg = _mm512_loadu_epi32(right + right_idx);  // Load into left_reg to preserve pending right_reg
             right_idx += 16;
             merge_512_registers(&left_reg, &right_reg);
             _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
-            if(right[right_idx] >= right_reg[15]) {
+            if(right_idx < size_right && right[right_idx] >= right_reg[15]) {
                 //memcpy the rest and break
                 _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
                 memcpy(arr + left_idx + right_idx, right + right_idx, (size_right - right_idx) * sizeof(uint32_t));
@@ -218,16 +218,16 @@ void merge_arrays(
             left_idx += 16;
             merge_512_registers(&left_reg, &right_reg);
             _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
-            if(left[left_idx] >= left_reg[15]) {
+            if(left_idx < size_left && left[left_idx] >= right_reg[15]) {
                 //memcpy the rest and break
-                _mm512_storeu_epi32(arr + left_idx + right_idx - 16, left_reg);
+                _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
                 memcpy(arr + left_idx + right_idx, left + left_idx, (size_left - left_idx) * sizeof(uint32_t));
                 done = 1;
                 break;
             }
         }   
         if(done == 0){
-            _mm512_storeu_epi32(arr + left_idx + right_idx - 16, left_reg);
+            _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
         }
     }
     else{
