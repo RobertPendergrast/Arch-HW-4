@@ -183,7 +183,7 @@ void merge_arrays(
             left_idx += 16;
         }
         else {
-            right_reg = _mm512_loadu_epi32(right + right_idx);
+            left_reg = _mm512_loadu_epi32(right + right_idx);
             right_idx += 16;
         }
         merge_512_registers(&left_reg, &right_reg);
