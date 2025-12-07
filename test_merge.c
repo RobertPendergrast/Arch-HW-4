@@ -26,17 +26,20 @@ void run_128(){
 }
 
 void run_512(){
-    uint32_t left[] = {32, 24, 1, 17, 28, 3, 10, 15, 21, 4, 26, 12, 30, 8, 19, 2};
-    // size_t size_left = sizeof(left) / sizeof(uint32_t);
-    uint32_t right[] = {11, 25, 9, 14, 29, 5, 18, 6, 22, 13, 27, 7, 20, 31, 16, 23};
-    // size_t size_right = sizeof(right) / sizeof(uint32_t);
+    // uint32_t left[] = {32, 24, 1, 17, 28, 3, 10, 15, 21, 4, 26, 12, 30, 8, 19, 2};
+    // uint32_t right[] = {11, 25, 9, 14, 29, 5, 18, 6, 22, 13, 27, 7, 20, 31, 16, 23};
+    uint32_t left[] = {1, 2, 3, 4, 5 , 6 , 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    uint32_t right[] = {17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+
      __m512i left_reg = _mm512_loadu_epi32((__m512i*) left);
      __m512i right_reg = _mm512_loadu_epi32((__m512i*) right);
+
     printf("Before: \n");
     printf("Left: \n");
     print_512_num(left_reg);
     printf("Right: \n");
     print_512_num(right_reg);
+
     merge_512_registers(&left_reg, &right_reg);
     printf("After: \n");
     printf("Left: \n");
