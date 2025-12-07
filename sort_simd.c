@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <time.h>
+#include <immintrin.h>
 #include "utils.h"
 #include "merge.h"
 
@@ -13,8 +14,8 @@ void sort_array(uint32_t *arr, size_t size) {
 
 }
 
-// Insertion sort for small arrays (faster than merge sort for small n)
-void insertion_sort(uint32_t *arr, size_t size) {
+// Insertion sort for small arrays
+static inline void insertion_sort(uint32_t *arr, size_t size) {
     for (size_t i = 1; i < size; i++) {
         uint32_t key = arr[i];
         size_t j = i;
@@ -26,45 +27,87 @@ void insertion_sort(uint32_t *arr, size_t size) {
     }
 }
 
-// Base case threshold: use insertion sort for arrays smaller than this
-// Set to 32 for performance (insertion sort is faster for small arrays)
-// Set to 1 for minimal base case (single elements are trivially sorted)
-#define SORT_THRESHOLD 32
+// SIMD sorting network for exactly 32 elements (two 512-bit registers)
+static inline void sort_32_simd(uint32_t *arr) {
+    __m512i a = _mm512_loadu_epi32(arr);
+    __m512i b = _mm512_loadu_epi32(arr + 16);
+    
+    // Sort each register individually using bitonic sort
+    // This requires sorting network within each register first
+    // For now, use merge to combine two sorted halves
+    
+    // Sort first 16: split into two 8s, sort, merge
+    // Simplified: just merge the two registers (assumes inputs need full sort)
+    // We'll use a simple approach: sort in place then merge
+    
+    // For a proper 32-element sort, we need a full sorting network
+    // Fallback to insertion sort for the base case for correctness
+    insertion_sort(arr, 32);
+}
 
+// Base case threshold - larger = fewer merge passes, but base sort matters more
+#define SORT_THRESHOLD 64
+
+// Bottom-up merge sort: O(1) allocations instead of O(N) allocations!
 void basic_merge_sort(uint32_t *arr, size_t size) {
-    // Base case: use insertion sort for small arrays
-    // IMPORTANT: Must actually sort! Merge assumes sorted inputs.
-    if (size <= SORT_THRESHOLD) {
-        insertion_sort(arr, size);
-        return;
+    if (size <= 1) return;
+    
+    // Step 1: Sort all base-case chunks in place
+    for (size_t i = 0; i < size; i += SORT_THRESHOLD) {
+        size_t chunk_size = (i + SORT_THRESHOLD <= size) ? SORT_THRESHOLD : (size - i);
+        insertion_sort(arr + i, chunk_size);
     }
-    size_t middle = size / 2;
-    size_t size_left = middle;
-    size_t size_right = size - middle;
-
-    // Ensure left and right arrays are cache line aligned (typically 64 bytes)
-    uint32_t* left = NULL;
-    uint32_t* right = NULL;
-    if (posix_memalign((void**)&left, 64, size_left * sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "posix_memalign failed for left array\n");
+    
+    // Step 2: Allocate ONE temp buffer for all merges
+    uint32_t *temp = NULL;
+    if (posix_memalign((void**)&temp, 64, size * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "posix_memalign failed for temp buffer\n");
         exit(EXIT_FAILURE);
     }
-    if (posix_memalign((void**)&right, 64, size_right * sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "posix_memalign failed for right array\n");
-        free(left);
-        exit(EXIT_FAILURE);
+    
+    // Step 3: Bottom-up merge passes
+    // Each pass doubles the size of sorted runs
+    uint32_t *src = arr;
+    uint32_t *dst = temp;
+    
+    for (size_t width = SORT_THRESHOLD; width < size; width *= 2) {
+        // Merge adjacent pairs of runs
+        size_t i = 0;
+        while (i < size) {
+            size_t left_start = i;
+            size_t left_size = (left_start + width <= size) ? width : (size - left_start);
+            size_t right_start = left_start + left_size;
+            size_t right_size = 0;
+            
+            if (right_start < size) {
+                right_size = (right_start + width <= size) ? width : (size - right_start);
+            }
+            
+            if (right_size == 0) {
+                // No right half - just copy left to dst
+                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+            } else {
+                // Merge left and right into dst
+                merge_arrays(src + left_start, left_size, 
+                           src + right_start, right_size, 
+                           dst + left_start);
+            }
+            
+            i = right_start + right_size;
+        }
+        
+        // Swap src and dst for next pass
+        uint32_t *swap = src;
+        src = dst;
+        dst = swap;
     }
-
-    memcpy(left, arr, size_left * sizeof(uint32_t));
-    memcpy(right, arr + middle, size_right * sizeof(uint32_t));
-
-    basic_merge_sort(left, size_left);
-    basic_merge_sort(right, size_right);
-
-    // Merge the two halves 
-    merge_arrays(left, size_left, right, size_right, arr);
-    free(left);
-    free(right);
+    
+    // If result ended up in temp, copy back to arr
+    if (src != arr) {
+        memcpy(arr, src, size * sizeof(uint32_t));
+    }
+    
+    free(temp);
 }
 
 int main(int argc, char *argv[]) {
