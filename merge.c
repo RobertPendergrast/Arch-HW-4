@@ -206,14 +206,28 @@ void merge_arrays(
     size_t left_idx = 16;
     
     // Main SIMD loop: continue while BOTH sides can provide full 16-element chunks
+    // Uses branchless selection to avoid branch mispredictions
     while (left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
-        if (left[left_idx] <= right[right_idx]) {
-            left_reg = _mm512_loadu_epi32(left + left_idx);
-            left_idx += 16;
-        } else {
-            left_reg = _mm512_loadu_epi32(right + right_idx);
-            right_idx += 16;
-        }
+        // Prefetch ahead to hide memory latency
+        _mm_prefetch((const char*)(left + left_idx + 64), _MM_HINT_T0);
+        _mm_prefetch((const char*)(right + right_idx + 64), _MM_HINT_T0);
+        
+        // Speculatively load both next chunks
+        __m512i next_left = _mm512_loadu_epi32(left + left_idx);
+        __m512i next_right = _mm512_loadu_epi32(right + right_idx);
+        
+        // Compare first elements to decide which chunk to use
+        unsigned int take_left = left[left_idx] <= right[right_idx];
+        
+        // Branchless select: if take_left, use next_left; else use next_right
+        // Using mask blend: mask=0xFFFF means take from second arg (next_left)
+        __mmask16 mask = take_left ? 0xFFFF : 0x0000;
+        left_reg = _mm512_mask_blend_epi32(mask, next_right, next_left);
+        
+        // Branchless index update
+        left_idx += take_left * 16;
+        right_idx += (!take_left) * 16;
+        
         merge_512_registers(&left_reg, &right_reg);
         _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
     }
