@@ -262,6 +262,25 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+// Order-independent hash using XOR and sum (parallel)
+// Returns two values: xor_hash and sum_hash
+static void compute_hash(uint32_t *arr, size_t size, uint64_t *xor_out, uint64_t *sum_out) {
+    uint64_t xor_hash = 0;
+    uint64_t sum_hash = 0;
+    
+    #pragma omp parallel reduction(^:xor_hash) reduction(+:sum_hash)
+    {
+        #pragma omp for schedule(static)
+        for (size_t i = 0; i < size; i++) {
+            xor_hash ^= arr[i];
+            sum_hash += arr[i];
+        }
+    }
+    
+    *xor_out = xor_hash;
+    *sum_out = sum_hash;
+}
+
 // Sort a single chunk with ALL threads collaborating (cache-friendly)
 // All threads work on the SAME chunk, keeping data hot in L3 cache
 static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
@@ -427,9 +446,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
-                
-                // Skip if this pair starts beyond array
-                if (left_start >= size) continue;
+                teh
                 
                 size_t left_size = (left_start + width <= size) ? width : (size - left_start);
                 size_t right_start = left_start + left_size;
@@ -450,7 +467,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             int threads_used = (num_pairs < NUM_THREADS) ? (int)num_pairs : NUM_THREADS;
             printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %d threads, %.2f GB/s)\n", 
                    width, t_end - t_start, num_pairs, threads_used, throughput);
-            
+                   teh
             // Swap src and dst
             uint32_t *swap = src;
             src = dst;
@@ -488,6 +505,11 @@ int main(int argc, char *argv[]) {
 
     printf("Read %lu elements from %s\n", size, argv[1]);
 
+    // Compute hash before sorting (order-independent)
+    uint64_t xor_before, sum_before;
+    compute_hash(arr, size, &xor_before, &sum_before);
+    printf("Input hash: XOR=0x%016lx SUM=0x%016lx\n", xor_before, sum_before);
+
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
@@ -496,6 +518,19 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     printf("Sorting took %.3f seconds\n", elapsed);
+
+    // Compute hash after sorting
+    uint64_t xor_after, sum_after;
+    compute_hash(arr, size, &xor_after, &sum_after);
+    printf("Output hash: XOR=0x%016lx SUM=0x%016lx\n", xor_after, sum_after);
+
+    // Verify hashes match (same elements, just reordered)
+    if (xor_before != xor_after || sum_before != sum_after) {
+        printf("Error: Hash mismatch! Elements were lost or corrupted during sorting.\n");
+        free(arr);
+        return 1;
+    }
+    printf("Hash check passed: all elements preserved.\n");
 
     // Only print array if small enough
     if (size <= 10) {
