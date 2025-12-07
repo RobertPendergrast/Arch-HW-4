@@ -5,8 +5,12 @@
 #include <string.h>
 #include <time.h>
 #include <immintrin.h>
+#include <omp.h>
 #include "utils.h"
 #include "merge.h"
+
+// Number of threads for OpenMP parallelization
+#define NUM_THREADS 16
 
 // Avoid making changes to this function skeleton, apart from data type changes if required
 // In this starter code we have used uint32_t, feel free to change it to any other data type if required
@@ -313,12 +317,14 @@ static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
     }
 }
 
-// Bottom-up merge sort with L3 cache blocking
+// Bottom-up merge sort with L3 cache blocking and OpenMP parallelization
 void basic_merge_sort(uint32_t *arr, size_t size) {
     if (size <= 1) return;
     
     double t_start, t_end;
-    int pass_num = 0;
+    
+    // Set number of threads
+    omp_set_num_threads(NUM_THREADS);
     
     // Allocate temp buffer (reused for all operations)
     uint32_t *temp = NULL;
@@ -327,56 +333,60 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         exit(EXIT_FAILURE);
     }
     
-    // Step 1: Sort each L3-sized chunk completely
-    // This keeps all small merges (which are slow) in L3 cache
+    // ========== Phase 1: Sort each L3-sized chunk (PARALLEL) ==========
+    // Each chunk is completely independent
     t_start = get_time_sec();
     size_t num_chunks = (size + L3_CHUNK_ELEMENTS - 1) / L3_CHUNK_ELEMENTS;
     
-    for (size_t c = 0; c < size; c += L3_CHUNK_ELEMENTS) {
-        size_t chunk_size = (c + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - c);
-        sort_chunk(arr + c, chunk_size, temp + c);
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (size_t c = 0; c < num_chunks; c++) {
+        size_t start = c * L3_CHUNK_ELEMENTS;
+        size_t chunk_size = (start + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - start);
+        sort_chunk(arr + start, chunk_size, temp + start);
     }
     t_end = get_time_sec();
-    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec\n", 
-           num_chunks, t_end - t_start);
+    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads)\n", 
+           num_chunks, t_end - t_start, NUM_THREADS);
     
-    // Step 2: Merge L3-sized chunks together (these are large merges, ~7 GB/s)
-    // Only needed if we have more than one chunk
+    // ========== Phase 2: Merge L3-sized chunks together (PARALLEL) ==========
+    // At each width, all merge pairs are independent
     if (size > L3_CHUNK_ELEMENTS) {
         uint32_t *src = arr;
         uint32_t *dst = temp;
         
         for (size_t width = L3_CHUNK_ELEMENTS; width < size; width *= 2) {
             t_start = get_time_sec();
-            size_t num_merges = 0;
             
-            size_t i = 0;
-            while (i < size) {
-                size_t left_start = i;
+            // Calculate number of merge pairs at this width
+            // Each pair covers 2*width elements
+            size_t num_pairs = (size + 2 * width - 1) / (2 * width);
+            
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (size_t p = 0; p < num_pairs; p++) {
+                size_t left_start = p * 2 * width;
+                
+                // Skip if this pair starts beyond array
+                if (left_start >= size) continue;
+                
                 size_t left_size = (left_start + width <= size) ? width : (size - left_start);
                 size_t right_start = left_start + left_size;
-                size_t right_size = 0;
                 
-                if (right_start < size) {
-                    right_size = (right_start + width <= size) ? width : (size - right_start);
-                }
-                
-                if (right_size == 0) {
+                if (right_start >= size) {
+                    // Odd chunk with no merge partner - just copy
                     memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
                 } else {
+                    size_t right_size = (right_start + width <= size) ? width : (size - right_start);
                     merge_arrays(src + left_start, left_size, 
                                src + right_start, right_size, 
                                dst + left_start);
-                    num_merges++;
                 }
-                
-                i = right_start + right_size;
             }
             
             t_end = get_time_sec();
             double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n", 
-                   width, t_end - t_start, num_merges, throughput);
+            int threads_used = (num_pairs < NUM_THREADS) ? (int)num_pairs : NUM_THREADS;
+            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %d threads, %.2f GB/s)\n", 
+                   width, t_end - t_start, num_pairs, threads_used, throughput);
             
             // Swap src and dst
             uint32_t *swap = src;
