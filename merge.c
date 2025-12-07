@@ -70,90 +70,94 @@ void merge_128_registers(
 }
 
 
-// 512 Constants - moved to file scope for efficiency
-const __mmask16 _512_BLEND_1 = 0b1111111100000000;
-const __mmask16 _512_BLEND_2 = 0b1111000011110000;
-const __mmask16 _512_BLEND_3 = 0b1100110011001100;  // For level 3: groups of 2
-const __mmask16 _512_BLEND_4 = 0b1010101010101010;  // For level 4: alternating
-
-// Shuffle indices - precomputed at file scope
-// Note: _mm512_set_epi32 args are in reverse order (element 15 first)
-static __m512i get_512_rev(void) {
-    return _mm512_set_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-}
-static __m512i get_512_shuffle_1(void) {
-    return _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8);
-}
-static __m512i get_512_shuffle_2(void) {
-    return _mm512_set_epi32(11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4);
-}
+// 512 Constants - blend masks for each level of bitonic merge
+// Blend mask: 1 = take from second operand, 0 = take from first
+const __mmask16 _512_BLEND_8  = 0xFF00;  // upper 8 from second: 0b1111111100000000
+const __mmask16 _512_BLEND_4  = 0xF0F0;  // groups of 4:         0b1111000011110000
+const __mmask16 _512_BLEND_2  = 0xCCCC;  // groups of 2:         0b1100110011001100
+const __mmask16 _512_BLEND_1  = 0xAAAA;  // alternating:         0b1010101010101010
 
 /*
  * Takes in two m512i registers and merges them in place.
- * Fully inlined bitonic merge network - all 4 levels in 512-bit registers.
+ * Full 512-bit bitonic merge network - no fallback to 128-bit.
+ * 
+ * Algorithm: Standard bitonic merge
+ * 1. Reverse right register to form bitonic sequence
+ * 2. Compare-swap across registers (distance 16)
+ * 3. Bitonic clean each register: distances 8, 4, 2, 1
  */
 inline __attribute__((always_inline)) void merge_512_registers(
     __m512i *left,
     __m512i *right
 ) {
-    // Get shuffle indices (compiler will optimize these)
-    __m512i _512_REV = get_512_rev();
-    __m512i _512_SHUFFLE_1 = get_512_shuffle_1();
-    __m512i _512_SHUFFLE_2 = get_512_shuffle_2();
+    // Shuffle indices for cross-lane permutations (distance 8 and 4)
+    const __m512i idx_rev = _mm512_set_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
+    const __m512i idx_swap8 = _mm512_set_epi32(7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8);
+    const __m512i idx_swap4 = _mm512_set_epi32(11,10,9,8,15,14,13,12,3,2,1,0,7,6,5,4);
 
-    // Level 0: Reverse the right register to form bitonic sequence
-    *right = _mm512_permutexvar_epi32(_512_REV, *right);
+    // Step 0: Reverse right register to form bitonic sequence
+    *right = _mm512_permutexvar_epi32(idx_rev, *right);
 
-    // Level 1: Compare 16 vs 16, split into two groups
-    __m512i L1 = _mm512_min_epi32(*left, *right);
-    __m512i H1 = _mm512_max_epi32(*left, *right);
-    __m512i L1p = _mm512_mask_blend_epi32(_512_BLEND_1, L1, H1);
-    __m512i H1p = _mm512_mask_blend_epi32(_512_BLEND_1, H1, L1);
-    H1p = _mm512_permutexvar_epi32(_512_SHUFFLE_1, H1p);
+    // Step 1: Compare-swap across registers (distance 16)
+    // After this, left has smaller elements, right has larger elements
+    __m512i lo = _mm512_min_epi32(*left, *right);
+    __m512i hi = _mm512_max_epi32(*left, *right);
+    *left = lo;
+    *right = hi;
 
-    // Level 2: Compare 8 vs 8 within each group
-    __m512i L2 = _mm512_min_epi32(L1p, H1p);
-    __m512i H2 = _mm512_max_epi32(L1p, H1p);
-    __m512i L2p = _mm512_mask_blend_epi32(_512_BLEND_2, L2, H2);
-    __m512i H2p = _mm512_mask_blend_epi32(_512_BLEND_2, H2, L2);
-    H2p = _mm512_permutexvar_epi32(_512_SHUFFLE_2, H2p);
-
-    // Level 3: Compare 4 vs 4 (using within-lane shuffle - faster!)
-    __m512i L3 = _mm512_min_epi32(L2p, H2p);
-    __m512i H3 = _mm512_max_epi32(L2p, H2p);
-    __m512i L3p = _mm512_mask_blend_epi32(_512_BLEND_3, L3, H3);
-    __m512i H3p = _mm512_mask_blend_epi32(_512_BLEND_3, H3, L3);
-    // _mm512_shuffle_epi32 applies same shuffle to each 128-bit lane
-    H3p = _mm512_shuffle_epi32(H3p, _MM_SHUFFLE(1, 0, 3, 2));  // 0b01001110
-
-    // Level 4: Compare 2 vs 2
-    __m512i L4 = _mm512_min_epi32(L3p, H3p);
-    __m512i H4 = _mm512_max_epi32(L3p, H3p);
-    __m512i L4p = _mm512_mask_blend_epi32(_512_BLEND_4, L4, H4);
-    __m512i H4p = _mm512_mask_blend_epi32(_512_BLEND_4, H4, L4);
-    H4p = _mm512_shuffle_epi32(H4p, _MM_SHUFFLE(2, 3, 0, 1));  // 0b10110001
-
-    // Level 5: Final compare and interleave to produce sorted output
-    __m512i L5 = _mm512_min_epi32(L4p, H4p);
-    __m512i H5 = _mm512_max_epi32(L4p, H4p);
+    // Now each register needs independent bitonic clean (distances 8,4,2,1)
+    // We process both registers in parallel for better instruction-level parallelism
     
-    // Final shuffle and blend (same pattern as 128-bit version, applied per lane)
-    __m512i H5s = _mm512_shuffle_epi32(H5, _MM_SHUFFLE(1, 0, 3, 2));  // 0b01001110
-    __m512i L5p = _mm512_mask_blend_epi32(_512_BLEND_3, L5, H5s);
-    __m512i H5p = _mm512_mask_blend_epi32(_512_BLEND_3, H5s, L5);
-    L5p = _mm512_shuffle_epi32(L5p, _MM_SHUFFLE(3, 1, 2, 0));  // 0b11011000
-    H5p = _mm512_shuffle_epi32(H5p, _MM_SHUFFLE(1, 3, 0, 2));  // 0b01110010
-
-    // Combine lanes: L5p has lower 4 of each 8, H5p has upper 4 of each 8
-    // Need to interleave: left gets lanes 0,1 from both, right gets lanes 2,3
-    __m512i left_lo = _mm512_shuffle_i64x2(L5p, H5p, 0b01000100);  // lanes 0,1 from L5p, 0,1 from H5p
-    __m512i left_hi = _mm512_shuffle_i64x2(L5p, H5p, 0b11101110);  // lanes 2,3 from L5p, 2,3 from H5p
+    // Step 2: Distance 8 - compare elements i with i+8
+    __m512i left_shuf = _mm512_permutexvar_epi32(idx_swap8, *left);
+    __m512i right_shuf = _mm512_permutexvar_epi32(idx_swap8, *right);
     
-    // Permute to get final order
-    *left = _mm512_permutex2var_epi64(left_lo, 
-        _mm512_set_epi64(11, 10, 3, 2, 9, 8, 1, 0), left_hi);
-    *right = _mm512_permutex2var_epi64(left_lo,
-        _mm512_set_epi64(15, 14, 7, 6, 13, 12, 5, 4), left_hi);
+    lo = _mm512_min_epi32(*left, left_shuf);
+    hi = _mm512_max_epi32(*left, left_shuf);
+    *left = _mm512_mask_blend_epi32(_512_BLEND_8, lo, hi);
+    
+    lo = _mm512_min_epi32(*right, right_shuf);
+    hi = _mm512_max_epi32(*right, right_shuf);
+    *right = _mm512_mask_blend_epi32(_512_BLEND_8, lo, hi);
+
+    // Step 3: Distance 4 - compare elements i with i+4 within each group of 8
+    left_shuf = _mm512_permutexvar_epi32(idx_swap4, *left);
+    right_shuf = _mm512_permutexvar_epi32(idx_swap4, *right);
+    
+    lo = _mm512_min_epi32(*left, left_shuf);
+    hi = _mm512_max_epi32(*left, left_shuf);
+    *left = _mm512_mask_blend_epi32(_512_BLEND_4, lo, hi);
+    
+    lo = _mm512_min_epi32(*right, right_shuf);
+    hi = _mm512_max_epi32(*right, right_shuf);
+    *right = _mm512_mask_blend_epi32(_512_BLEND_4, lo, hi);
+
+    // Step 4: Distance 2 - compare elements i with i+2 within each group of 4
+    // Can use within-lane shuffle (faster than cross-lane permute)
+    // _MM_SHUFFLE(1,0,3,2) swaps pairs: [0,1,2,3] -> [2,3,0,1]
+    left_shuf = _mm512_shuffle_epi32(*left, _MM_SHUFFLE(1,0,3,2));
+    right_shuf = _mm512_shuffle_epi32(*right, _MM_SHUFFLE(1,0,3,2));
+    
+    lo = _mm512_min_epi32(*left, left_shuf);
+    hi = _mm512_max_epi32(*left, left_shuf);
+    *left = _mm512_mask_blend_epi32(_512_BLEND_2, lo, hi);
+    
+    lo = _mm512_min_epi32(*right, right_shuf);
+    hi = _mm512_max_epi32(*right, right_shuf);
+    *right = _mm512_mask_blend_epi32(_512_BLEND_2, lo, hi);
+
+    // Step 5: Distance 1 - compare adjacent elements
+    // _MM_SHUFFLE(2,3,0,1) swaps adjacent: [0,1,2,3] -> [1,0,3,2]
+    left_shuf = _mm512_shuffle_epi32(*left, _MM_SHUFFLE(2,3,0,1));
+    right_shuf = _mm512_shuffle_epi32(*right, _MM_SHUFFLE(2,3,0,1));
+    
+    lo = _mm512_min_epi32(*left, left_shuf);
+    hi = _mm512_max_epi32(*left, left_shuf);
+    *left = _mm512_mask_blend_epi32(_512_BLEND_1, lo, hi);
+    
+    lo = _mm512_min_epi32(*right, right_shuf);
+    hi = _mm512_max_epi32(*right, right_shuf);
+    *right = _mm512_mask_blend_epi32(_512_BLEND_1, lo, hi);
 }
 
 void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
