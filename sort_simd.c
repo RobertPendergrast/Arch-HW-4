@@ -457,10 +457,14 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             dst = swap;
         }
         
-        // Copy result back to arr if needed
+        // Copy result back to arr if needed - PARALLEL copy
         if (src != arr) {
             t_start = get_time_sec();
-            memcpy(arr, src, size * sizeof(uint32_t));
+            #pragma omp parallel for schedule(static)
+            for (size_t i = 0; i < size; i += 4096) {
+                size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
+                memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
+            }
             t_end = get_time_sec();
             printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
         }
