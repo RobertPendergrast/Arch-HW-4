@@ -117,12 +117,14 @@ void merge_512_registers(
     merge_128_registers(&L3_1, &H3_1);
     merge_128_registers(&L3_2, &H3_2);
     merge_128_registers(&L3_3, &H3_3);
-    print_128_num(L3_0);
-    print_128_num(H3_0);
-    print_128_num(L3_1);
-    print_128_num(H3_1);
-    print_128_num(L3_2);
-    print_128_num(H3_2);
-    print_128_num(L3_3);
-    print_128_num(H3_3);
+
+    __m256i L3p_0 = _mm256_set_m128i(H3_0, L3_0); // Combines v1 and v2 into a m256i register
+    __m256i L3p_1 = _mm256_set_m128i(H3_1, L3_1); // Combines v3 and v4 into a m256i register
+    *left = _mm512_inserti64x4(*left, L3p_0, 0);
+    *left = _mm512_inserti64x4(*left, L3p_1, 1);
+
+    __m256i H3p_0 = _mm256_set_m128i(H3_2, L3_2); // Combines v1 and v2 into a m256i register
+    __m256i H3p_1 = _mm256_set_m128i(H3_3, L3_3); // Combines v3 and v4 into a m256i register
+    *right = _mm512_inserti64x4(*right, H3p_0, 0);
+    *right = _mm512_inserti64x4(*right, H3p_1, 1);
 }
