@@ -161,7 +161,7 @@ inline __attribute__((always_inline)) void merge_512_registers(
     *right = _mm512_mask_blend_epi32(_512_BLEND_1, lo, hi);
 }
 
-void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
+void merge_local(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
     int i = 0;
     int j = 0;
     int k = 0;
@@ -246,11 +246,11 @@ void merge_arrays(
         uint32_t *remainder_merged = (uint32_t*)malloc(remainder_size * sizeof(uint32_t));
         
         // Merge the two remainders
-        merge(left + left_idx, right + right_idx, remainder_merged, 
+        merge_local(left + left_idx, right + right_idx, remainder_merged, 
               left_remaining, right_remaining);
         
         // Merge pending 16 with the merged remainders into final output
-        merge(pending, remainder_merged, arr + output_pos, 16, remainder_size);
+        merge_local(pending, remainder_merged, arr + output_pos, 16, remainder_size);
         
         free(remainder_merged);
     }
