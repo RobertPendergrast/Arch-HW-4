@@ -56,8 +56,20 @@ void run_merge_arrays(){
     printf("After: \n");
     printf("Arr: \n");
     print_array(arr, 32);
+
+    uint32_t left2[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50};
+    uint32_t right2[] = {17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50};
+    //prinnting the lens of the arrays
+    printf("Left2 size: %zu\n", sizeof(left2) / sizeof(uint32_t));
+    printf("Right2 size: %zu\n", sizeof(right2) / sizeof(uint32_t));
+    uint32_t arr2[64];
+    merge_arrays(left2, 32, right2, 32, arr2);
+    printf("After: \n");
+    printf("Arr: \n");
+    print_array(arr2, 64);
 }
 
 int main(int argc, char *argv[]) {
-    run_512();
+    run_merge_arrays();
+    return 0;
 }
