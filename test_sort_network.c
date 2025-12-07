@@ -7,11 +7,13 @@
 
 // Copy of the sorting network for testing
 static const int SORT_SWAP1_IDX[16] __attribute__((aligned(64))) = 
-    {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};
+    {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};  // distance 1
 static const int SORT_SWAP2_IDX[16] __attribute__((aligned(64))) = 
-    {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};
+    {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};  // distance 2
 static const int SORT_SWAP4_IDX[16] __attribute__((aligned(64))) = 
-    {7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8};
+    {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};  // distance 4
+static const int SORT_SWAP8_IDX[16] __attribute__((aligned(64))) = 
+    {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};  // distance 8
 
 void print_vec(const char *label, __m512i v) {
     uint32_t arr[16];
@@ -26,7 +28,7 @@ __m512i sort_16_debug(__m512i v) {
     const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
     const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
     const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
-    const __m512i swap8 = _mm512_load_epi32(IDX_REV);
+    const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
     
     __m512i t, lo, hi;
     
@@ -39,18 +41,18 @@ __m512i sort_16_debug(__m512i v) {
     v = _mm512_mask_blend_epi32(0x6666, lo, hi);
     print_vec("Stage 1 ", v);
     
-    // Stage 2a: distance 2 (mask 0x3C3C)
+    // Stage 2a: distance 2 (mask 0xC3C3)
     t = _mm512_permutexvar_epi32(swap2, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0x3C3C, lo, hi);
+    v = _mm512_mask_blend_epi32(0xC3C3, lo, hi);
     print_vec("Stage 2a", v);
     
-    // Stage 2b: distance 1 (mask 0x5A5A)
+    // Stage 2b: distance 1 (mask 0xA5A5)
     t = _mm512_permutexvar_epi32(swap1, v);
     lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0x5A5A, lo, hi);
+    v = _mm512_mask_blend_epi32(0xA5A5, lo, hi);
     print_vec("Stage 2b", v);
     
     // Stage 3a: distance 4 (mask 0x0FF0)
