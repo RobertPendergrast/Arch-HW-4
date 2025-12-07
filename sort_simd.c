@@ -13,31 +13,27 @@ void sort_array(uint32_t *arr, size_t size) {
 
 }
 
-void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int size_right) {
-    int i = 0;
-    int j = 0;
-    int k = 0;
-    // Merge the two arrays into arr
-    while (i < size_left && j < size_right) {
-        if (left[i] <= right[j]) {
-            arr[k++] = left[i++];
-        } else {
-            arr[k++] = right[j++];
+// Insertion sort for small arrays (faster than merge sort for small n)
+void insertion_sort(uint32_t *arr, size_t size) {
+    for (size_t i = 1; i < size; i++) {
+        uint32_t key = arr[i];
+        size_t j = i;
+        while (j > 0 && arr[j - 1] > key) {
+            arr[j] = arr[j - 1];
+            j--;
         }
-    }
-    // Merge the rest in
-    while (i < size_left) {
-        arr[k++] = left[i++];
-    }
-    while (j< size_right) {
-        arr[k++] = right[j++];
+        arr[j] = key;
     }
 }
 
+// Base case threshold: use insertion sort for arrays smaller than this
+#define SORT_THRESHOLD 32
+
 void basic_merge_sort(uint32_t *arr, size_t size) {
-    // Basic Merge Sort Implementation
-    if (size < 2) {
-        return; // Nothing to sort
+    // Base case: use insertion sort for small arrays
+    if (size <= SORT_THRESHOLD) {
+        insertion_sort(arr, size);
+        return;
     }
     int middle = size / 2;
     int size_left = middle;
