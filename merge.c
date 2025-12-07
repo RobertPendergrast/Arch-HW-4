@@ -118,11 +118,11 @@ void merge_512_registers(
     merge_128_registers(&L3_2, &H3_2);
     merge_128_registers(&L3_3, &H3_3);
     print_128_num(L3_0);
-    print_128_num(L3_1);
-    print_128_num(L3_2);
-    print_128_num(L3_3);
     print_128_num(H3_0);
+    print_128_num(L3_1);
     print_128_num(H3_1);
+    print_128_num(L3_2);
     print_128_num(H3_2);
+    print_128_num(L3_3);
     print_128_num(H3_3);
 }
