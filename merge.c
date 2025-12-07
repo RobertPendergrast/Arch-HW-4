@@ -95,14 +95,14 @@ void merge_512_registers(
     __m512i L2 = _mm512_min_epi32(L1p, H1p);
     __m512i H2 = _mm512_max_epi32(L1p, H1p);
     //Shuffle
+    print_512_num(L2);
+    print_512_num(H2);
     __m512i L2p = _mm512_mask_blend_epi32(_512_BLEND_2, L2, H2);
     __m512i H2p = _mm512_mask_blend_epi32(_512_BLEND_2, H2, L2);
     __m512i _512_SHUFFLE_2 = _mm512_set_epi32(
         11, 10, 9, 8, 15, 14, 13, 12, 3 , 2 , 1, 0, 7, 6, 5, 4
     );
     H2p = _mm512_permutexvar_epi32(_512_SHUFFLE_2, H1p);
-    print_512_num(L2p);
-    print_512_num(H2p);
     // Levels 3-4
     // Break each register up into 4 __mm128i registers and pass them into the
     // merge_128_registers function. Perhaps this should be put in an array...
