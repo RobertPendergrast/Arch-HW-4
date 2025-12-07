@@ -262,8 +262,70 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// Sort a single chunk completely (all merge passes up to chunk_size)
-// This keeps all small merges in L3 cache for better locality
+// Sort a single chunk with ALL threads collaborating (cache-friendly)
+// All threads work on the SAME chunk, keeping data hot in L3 cache
+static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
+    // Step 1: Base case sort (64-element chunks) - PARALLEL within chunk
+    size_t num_64_blocks = chunk_size / 64;
+    size_t remainder_start = num_64_blocks * 64;
+    
+    #pragma omp parallel for schedule(static)
+    for (size_t b = 0; b < num_64_blocks; b++) {
+        sort_64_simd(arr + b * 64);
+    }
+    
+    // Handle remainder (single thread, small work)
+    if (remainder_start + 32 <= chunk_size) {
+        sort_32_simd(arr + remainder_start);
+        remainder_start += 32;
+    }
+    if (remainder_start < chunk_size) {
+        insertion_sort(arr + remainder_start, chunk_size - remainder_start);
+    }
+    
+    // Step 2: All merge passes within this chunk - PARALLEL merges at each width
+    uint32_t *src = arr;
+    uint32_t *dst = temp;
+    
+    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
+        size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
+        
+        #pragma omp parallel for schedule(static)
+        for (size_t p = 0; p < num_pairs; p++) {
+            size_t left_start = p * 2 * width;
+            if (left_start >= chunk_size) continue;
+            
+            size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
+            size_t right_start = left_start + left_size;
+            
+            if (right_start >= chunk_size) {
+                // Odd chunk - just copy
+                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+            } else {
+                size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
+                merge_arrays(src + left_start, left_size, 
+                           src + right_start, right_size, 
+                           dst + left_start);
+            }
+        }
+        
+        // Swap src and dst (implicit barrier after parallel for)
+        uint32_t *swap = src;
+        src = dst;
+        dst = swap;
+    }
+    
+    // Copy result back to arr if needed - PARALLEL copy
+    if (src != arr) {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < chunk_size; i += 4096) {
+            size_t copy_size = (i + 4096 <= chunk_size) ? 4096 : (chunk_size - i);
+            memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
+        }
+    }
+}
+
+// Original single-threaded version (for comparison or fallback)
 static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
     // Step 1: Base case sort (64-element chunks)
     size_t i = 0;
@@ -333,19 +395,20 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         exit(EXIT_FAILURE);
     }
     
-    // ========== Phase 1: Sort each L3-sized chunk (PARALLEL) ==========
-    // Each chunk is completely independent
+    // ========== Phase 1: Sort each L3-sized chunk ==========
+    // Process ONE chunk at a time, but parallelize WITHIN each chunk
+    // This keeps all threads focused on the same L3-resident data (cache-friendly)
     t_start = get_time_sec();
     size_t num_chunks = (size + L3_CHUNK_ELEMENTS - 1) / L3_CHUNK_ELEMENTS;
     
-    #pragma omp parallel for schedule(dynamic, 1)
     for (size_t c = 0; c < num_chunks; c++) {
         size_t start = c * L3_CHUNK_ELEMENTS;
         size_t chunk_size = (start + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - start);
-        sort_chunk(arr + start, chunk_size, temp + start);
+        // All threads collaborate on THIS chunk (data stays in L3)
+        sort_chunk_parallel(arr + start, chunk_size, temp + start);
     }
     t_end = get_time_sec();
-    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads)\n", 
+    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
            num_chunks, t_end - t_start, NUM_THREADS);
     
     // ========== Phase 2: Merge L3-sized chunks together (PARALLEL) ==========
