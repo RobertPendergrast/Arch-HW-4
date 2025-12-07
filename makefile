@@ -20,6 +20,9 @@ merge: merge.c
 test_merge: test_merge.c merge.o utils.o
 	$(CC) $(CFLAGS) test_merge.c merge.o utils.o -o test_merge $(LDFLAGS)
 
+test_sort_network: test_sort_network.c merge.o
+	$(CC) $(CFLAGS) test_sort_network.c merge.o -o test_sort_network $(LDFLAGS)
+
 test_merge_run: test_merge
 	./test_merge
 
