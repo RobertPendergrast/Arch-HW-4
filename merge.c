@@ -244,10 +244,16 @@ void merge_arrays(
         uint32_t remainder_merged[32];
         
         // Merge the two remainders
-        merge_local(left + left_idx, right + right_idx, remainder_merged, 
-              left_remaining, right_remaining);
-        
-        // Merge pending 16 with the merged remainders into final output
-        merge_local(pending, remainder_merged, arr + output_pos, 16, remainder_size);
+        if(left_remaining < right_remaining) {
+            merge_local(left + left_idx, pending, remainder_merged, 
+              left_remaining, 16);
+            merge_local(remainder_merged, right + right_idx, arr + output_pos, 
+              left_remaining + 16, right_remaining);
+        } else {
+            merge_local(pending, left + left_idx, remainder_merged, 
+              16, left_remaining);
+            merge_local(remainder_merged, right + right_idx, arr + output_pos, 
+              left_remaining + 16, right_remaining);
+        }
     }
 }
