@@ -408,7 +408,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         sort_chunk_parallel(arr + start, chunk_size, temp + start);
     }
     t_end = get_time_sec();
-    printf("  [Phase 1] Sort %zu L3 chunks (4M elements each): %.3f sec (%d threads, cache-focused)\n", 
+    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
            num_chunks, t_end - t_start, NUM_THREADS);
     
     // ========== Phase 2: Merge L3-sized chunks together (PARALLEL) ==========
@@ -457,16 +457,12 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             dst = swap;
         }
         
-        // Copy result back to arr if needed - PARALLEL copy for speed
+        // Copy result back to arr if needed
         if (src != arr) {
             t_start = get_time_sec();
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < size; i += 65536) {
-                size_t chunk = (i + 65536 <= size) ? 65536 : (size - i);
-                memcpy(arr + i, src + i, chunk * sizeof(uint32_t));
-            }
+            memcpy(arr, src, size * sizeof(uint32_t));
             t_end = get_time_sec();
-            printf("  [Final ] Copy back: %.3f sec (parallel)\n", t_end - t_start);
+            printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
         }
     }
     
