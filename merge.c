@@ -1,6 +1,7 @@
 #include "merge.h"
 #include "utils.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Helper to extract the 15th (last) element from a __m512i register
@@ -172,12 +173,11 @@ void merge(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, int si
             arr[k++] = right[j++];
         }
     }
-    // Merge the rest in
-    while (i < size_left) {
-        arr[k++] = left[i++];
-    }
-    while (j< size_right) {
-        arr[k++] = right[j++];
+    // Copy remaining elements with memcpy
+    if (i < size_left) {
+        memcpy(arr + k, left + i, (size_left - i) * sizeof(uint32_t));
+    } else if (j < size_right) {
+        memcpy(arr + k, right + j, (size_right - j) * sizeof(uint32_t));
     }
 }
 
@@ -200,70 +200,58 @@ void merge_arrays(
     //creating a mm512i register from the left and right arrays
     __m512i left_reg = _mm512_loadu_epi32((__m512i*) left);
     __m512i right_reg = _mm512_loadu_epi32((__m512i*) right);
-
-    //merging the two registers
     merge_512_registers(&left_reg, &right_reg);
-
-    //storing the result in the arr array
     _mm512_storeu_epi32(arr, left_reg);
-    int right_idx = 16;
-    int left_idx = 16;
-    while(left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
-        if(left[left_idx] <= right[right_idx]) {
+    
+    size_t right_idx = 16;
+    size_t left_idx = 16;
+    
+    // Main SIMD loop: continue while BOTH sides can provide full 16-element chunks
+    while (left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
+        if (left[left_idx] <= right[right_idx]) {
             left_reg = _mm512_loadu_epi32(left + left_idx);
             left_idx += 16;
-        }
-        else {
+        } else {
             left_reg = _mm512_loadu_epi32(right + right_idx);
             right_idx += 16;
         }
         merge_512_registers(&left_reg, &right_reg);
         _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
     }
-    if(left_idx == size_left) {
-        printf("Left is done, merging right\n");
-        int done = 0;
-        while(right_idx + 16 <= size_right) {
-            left_reg = _mm512_loadu_epi32(right + right_idx);  // Load into left_reg to preserve pending right_reg
-            right_idx += 16;
-            merge_512_registers(&left_reg, &right_reg);
-            _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
-            if(right_idx < size_right && right[right_idx] >= extract_last_512(&right_reg)) {
-                //memcpy the rest and break
-                _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
-                memcpy(arr + left_idx + right_idx, right + right_idx, (size_right - right_idx) * sizeof(uint32_t));
-                done = 1;
-                break;
-            }
-            
-        }
-        if(done == 0){
-            _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
-        }
+    
+    // At this point, at least one side cannot provide a full 16-element chunk.
+    // We have three sorted sequences to merge:
+    //   1. The 16 pending elements in right_reg
+    //   2. left[left_idx : size_left]   (0 to size_left - left_idx elements)
+    //   3. right[right_idx : size_right] (0 to size_right - right_idx elements)
+    
+    size_t left_remaining = size_left - left_idx;
+    size_t right_remaining = size_right - right_idx;
+    size_t output_pos = left_idx + right_idx - 16;  // Where pending elements should start
+    
+    // Extract the 16 pending elements from right_reg
+    uint32_t pending[16];
+    _mm512_storeu_epi32(pending, right_reg);
+    
+    // Merge left_remainder with right_remainder into a temp buffer
+    // Max size: both could have up to (size - 16) elements if the other was exhausted early,
+    // but typically this is small. Use dynamic allocation for safety.
+    size_t remainder_size = left_remaining + right_remaining;
+    
+    if (remainder_size == 0) {
+        // No remainders - just output the pending 16
+        _mm512_storeu_epi32(arr + output_pos, right_reg);
+    } else {
+        // Allocate temp buffer for merged remainders
+        uint32_t *remainder_merged = (uint32_t*)malloc(remainder_size * sizeof(uint32_t));
+        
+        // Merge the two remainders
+        merge(left + left_idx, right + right_idx, remainder_merged, 
+              left_remaining, right_remaining);
+        
+        // Merge pending 16 with the merged remainders into final output
+        merge(pending, remainder_merged, arr + output_pos, 16, remainder_size);
+        
+        free(remainder_merged);
     }
-    else if(right_idx == size_right) {
-        printf("Right is done, merging left\n");
-        int done = 0;
-        while(left_idx + 16 <= size_left) {
-            left_reg = _mm512_loadu_epi32(left + left_idx);
-            left_idx += 16;
-            merge_512_registers(&left_reg, &right_reg);
-            _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
-            if(left_idx < size_left && left[left_idx] >= extract_last_512(&right_reg)) {
-                //memcpy the rest and break
-                _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
-                memcpy(arr + left_idx + right_idx, left + left_idx, (size_left - left_idx) * sizeof(uint32_t));
-                done = 1;
-                break;
-            }
-        }   
-        if(done == 0){
-            _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
-        }
-    }
-    else{
-        fprintf(stderr, "Error: Arrays are not cache line aligned for merge. Exiting.\n");
-        exit(1);
-    }
-     
 }

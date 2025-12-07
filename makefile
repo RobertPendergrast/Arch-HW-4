@@ -11,6 +11,9 @@ merge.o: merge.c merge.h
 sorting: sorting.c utils.o
 	$(CC) $(CFLAGS) sorting.c utils.o -o sorting $(LDFLAGS)
 
+sort_simd: sort_simd.c utils.o merge.o
+	$(CC) $(CFLAGS) sort_simd.c utils.o merge.o -o sort_simd $(LDFLAGS)
+
 merge: merge.c
 	$(CC) $(CFLAGS) merge.c -o merge $(LDFLAGS)
 
