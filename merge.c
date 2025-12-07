@@ -2,6 +2,13 @@
 #include "utils.h"
 #include <stdio.h>
 #include <string.h>
+
+// Helper to extract the 15th (last) element from a __m512i register
+static inline uint32_t extract_last_512(const __m512i *reg) {
+    // Element 15 is in lane 3 (bits 384-511), position 3 within that lane
+    __m128i lane3 = _mm512_extracti32x4_epi32(*reg, 3);
+    return (uint32_t)_mm_extract_epi32(lane3, 3);
+}
 // 128 Constants
 // Control to reverse. First two bits (11) means the new first value is the old
 // last value, etc...
@@ -85,7 +92,7 @@ static __m512i get_512_shuffle_2(void) {
  * Takes in two m512i registers and merges them in place.
  * Fully inlined bitonic merge network - all 4 levels in 512-bit registers.
  */
-static inline __attribute__((always_inline)) void merge_512_registers(
+inline __attribute__((always_inline)) void merge_512_registers(
     __m512i *left,
     __m512i *right
 ) {
@@ -217,7 +224,7 @@ void merge_arrays(
             right_idx += 16;
             merge_512_registers(&left_reg, &right_reg);
             _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
-            if(right_idx < size_right && right[right_idx] >= right_reg[15]) {
+            if(right_idx < size_right && right[right_idx] >= extract_last_512(&right_reg)) {
                 //memcpy the rest and break
                 _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
                 memcpy(arr + left_idx + right_idx, right + right_idx, (size_right - right_idx) * sizeof(uint32_t));
@@ -238,7 +245,7 @@ void merge_arrays(
             left_idx += 16;
             merge_512_registers(&left_reg, &right_reg);
             _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);
-            if(left_idx < size_left && left[left_idx] >= right_reg[15]) {
+            if(left_idx < size_left && left[left_idx] >= extract_last_512(&right_reg)) {
                 //memcpy the rest and break
                 _mm512_storeu_epi32(arr + left_idx + right_idx - 16, right_reg);
                 memcpy(arr + left_idx + right_idx, left + left_idx, (size_left - left_idx) * sizeof(uint32_t));
