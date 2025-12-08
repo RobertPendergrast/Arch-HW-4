@@ -67,6 +67,56 @@ static void stable_merge(uint32_t *left, size_t size_left,
     }
 }
 
+// ============== Interleaved merge: 2 independent merges per thread ==============
+// Gives CPU more independent work to hide latency
+static void stable_merge_interleaved_2(
+    uint32_t *left0, size_t size_left0, uint32_t *right0, size_t size_right0, uint32_t *out0,
+    uint32_t *left1, size_t size_left1, uint32_t *right1, size_t size_right1, uint32_t *out1
+) {
+    size_t i0 = 0, j0 = 0, k0 = 0;
+    size_t i1 = 0, j1 = 0, k1 = 0;
+    
+    // Interleaved loop - work on both merges alternately
+    while ((i0 < size_left0 && j0 < size_right0) && 
+           (i1 < size_left1 && j1 < size_right1)) {
+        // Merge 0: one step
+        uint32_t l0 = left0[i0], r0 = right0[j0];
+        uint32_t cmp0 = (l0 <= r0);
+        uint32_t mask0 = -cmp0;
+        out0[k0] = (l0 & mask0) | (r0 & ~mask0);
+        i0 += cmp0; j0 += (1 - cmp0); k0++;
+        
+        // Merge 1: one step (independent, can execute in parallel)
+        uint32_t l1 = left1[i1], r1 = right1[j1];
+        uint32_t cmp1 = (l1 <= r1);
+        uint32_t mask1 = -cmp1;
+        out1[k1] = (l1 & mask1) | (r1 & ~mask1);
+        i1 += cmp1; j1 += (1 - cmp1); k1++;
+    }
+    
+    // Finish merge 0
+    while (i0 < size_left0 && j0 < size_right0) {
+        uint32_t l0 = left0[i0], r0 = right0[j0];
+        uint32_t cmp0 = (l0 <= r0);
+        uint32_t mask0 = -cmp0;
+        out0[k0++] = (l0 & mask0) | (r0 & ~mask0);
+        i0 += cmp0; j0 += (1 - cmp0);
+    }
+    if (i0 < size_left0) memcpy(out0 + k0, left0 + i0, (size_left0 - i0) * sizeof(uint32_t));
+    if (j0 < size_right0) memcpy(out0 + k0, right0 + j0, (size_right0 - j0) * sizeof(uint32_t));
+    
+    // Finish merge 1
+    while (i1 < size_left1 && j1 < size_right1) {
+        uint32_t l1 = left1[i1], r1 = right1[j1];
+        uint32_t cmp1 = (l1 <= r1);
+        uint32_t mask1 = -cmp1;
+        out1[k1++] = (l1 & mask1) | (r1 & ~mask1);
+        i1 += cmp1; j1 += (1 - cmp1);
+    }
+    if (i1 < size_left1) memcpy(out1 + k1, left1 + i1, (size_left1 - i1) * sizeof(uint32_t));
+    if (j1 < size_right1) memcpy(out1 + k1, right1 + j1, (size_right1 - j1) * sizeof(uint32_t));
+}
+
 // ============== Parallel merge using median splitting ==============
 
 // Given two sorted arrays, find a split point that divides the combined 
