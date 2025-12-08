@@ -253,7 +253,7 @@ static inline void sort_64_simd(uint32_t *arr) {
 
 // L3 cache size: 32 MiB = 8M uint32_t elements
 // Sort entire chunks of this size before moving on (cache locality optimization)
-#define L3_CHUNK_ELEMENTS (8 * 1024 * 1024)
+#define L3_CHUNK_ELEMENTS (4 * 1024 * 1024)
 
 // Helper for timing
 static inline double get_time_sec() {
@@ -420,12 +420,11 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     t_start = get_time_sec();
     size_t num_chunks = (size + L3_CHUNK_ELEMENTS - 1) / L3_CHUNK_ELEMENTS;
     
-    #pragma omp parallel for schedule(dynamic, 1)
     for (size_t c = 0; c < num_chunks; c++) {
         size_t start = c * L3_CHUNK_ELEMENTS;
         size_t chunk_size = (start + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - start);
         // All threads collaborate on THIS chunk (data stays in L3)
-        sort_chunk(arr + start, chunk_size, temp + start);
+        sort_chunk_parallel(arr + start, chunk_size, temp + start);
     }
     t_end = get_time_sec();
     printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
@@ -550,10 +549,10 @@ int main(int argc, char *argv[]) {
     }
 
     // Write sorted array to output file
-    if (write_array_to_file(argv[2], arr, size) != 0) {
-        free(arr);
-        return 1;
-    }
+    // if (write_array_to_file(argv[2], arr, size) != 0) {
+    //     free(arr);
+    //     return 1;
+    // }
 
     free(arr);
     return 0;
