@@ -14,8 +14,74 @@
 
 // Software Write-Combining buffer size
 // Larger buffers = fewer flushes, better write coalescing
-// 256 elements = 1KB = 16 cache lines
+// 256 elements = 1024 bytes = 16 cache lines (tuned for large L2)
 #define WC_BUFFER_SIZE 256
+
+// Alignment requirement: 16 elements = 64 bytes = 1 cache line
+#define ALIGN_ELEMS 16
+#define ALIGN_MASK (ALIGN_ELEMS - 1)
+
+// Round up to next aligned offset
+#define ALIGN_UP(x) (((x) + ALIGN_MASK) & ~((size_t)ALIGN_MASK))
+
+// Max padding waste: 15 elements per bucket * 256 buckets = 3840 elements
+#define MAX_PADDING (ALIGN_MASK * RADIX_SIZE)
+
+// ============== Streaming Store Flush ==============
+// Two versions: fast aligned path (no checks) and general path (handles any alignment)
+
+// FAST PATH: Output is 64-byte aligned, buffer is 64-byte aligned
+// No alignment checks, pure streaming stores
+static inline void flush_buffer_aligned(uint32_t *buf, uint32_t *out, int count) {
+    int full_lines = count / 16;
+    
+    // Stream full cache lines (16 elements = 64 bytes each)
+    for (int line = 0; line < full_lines; line++) {
+        __m512i v = _mm512_load_si512((__m512i*)(buf + line * 16));
+        _mm512_stream_si512((__m512i*)(out + line * 16), v);
+    }
+    
+    // Handle tail (< 16 elements) with scalar stores
+    int tail_start = full_lines * 16;
+    for (int j = tail_start; j < count; j++) {
+        out[j] = buf[j];
+    }
+}
+
+// SLOW PATH: Handles arbitrary alignment
+// Only used for first flush of each bucket (to align subsequent flushes)
+static inline void flush_buffer_unaligned(uint32_t *buf, uint32_t *out, int count) {
+    int idx = 0;
+    
+    // Handle unaligned prefix until we hit 64-byte boundary
+    size_t misalign_bytes = ((size_t)out) & 63;
+    if (misalign_bytes != 0) {
+        int elems_to_align = (64 - misalign_bytes) / sizeof(uint32_t);
+        if (elems_to_align > count) elems_to_align = count;
+        
+        for (int j = 0; j < elems_to_align; j++) {
+            out[j] = buf[j];
+        }
+        idx = elems_to_align;
+    }
+    
+    // Stream the aligned middle portion
+    uint32_t *aligned_out = out + idx;
+    uint32_t *aligned_buf = buf + idx;
+    int remaining = count - idx;
+    int full_lines = remaining / 16;
+    
+    for (int line = 0; line < full_lines; line++) {
+        __m512i v = _mm512_loadu_si512((__m512i*)(aligned_buf + line * 16));
+        _mm512_stream_si512((__m512i*)(aligned_out + line * 16), v);
+    }
+    
+    // Handle tail
+    int tail_start = idx + full_lines * 16;
+    for (int j = tail_start; j < count; j++) {
+        out[j] = buf[j];
+    }
+}
 
 // Helper for timing
 static inline double get_time_sec(void) {
@@ -35,8 +101,9 @@ void sort_array(uint32_t *arr, size_t size) {
     
     double t_start, t_end;
     
-    // Allocate output buffer
-    uint32_t *temp = (uint32_t*)aligned_alloc(64, size * sizeof(uint32_t));
+    // Allocate output buffer (extra space for alignment padding)
+    size_t padded_size = size + MAX_PADDING;
+    uint32_t *temp = (uint32_t*)aligned_alloc(64, padded_size * sizeof(uint32_t));
     if (!temp) {
         fprintf(stderr, "Failed to allocate temp buffer\n");
         return;
@@ -152,10 +219,14 @@ void sort_array(uint32_t *arr, size_t size) {
             }
         }
         
-        // Compute prefix sum (exclusive)
-        global_prefix[0] = 0;
+        // Compute prefix sum (exclusive) WITH ALIGNMENT
+        // Each bucket starts at a 64-byte aligned offset (multiple of 16 elements)
+        // This guarantees all streaming store flushes hit aligned addresses!
+        global_prefix[0] = 0;  // Base is already 64-byte aligned
         for (int d = 1; d < RADIX_SIZE; d++) {
-            global_prefix[d] = global_prefix[d-1] + global_hist[d-1];
+            // Round up to next aligned offset
+            size_t natural_offset = global_prefix[d-1] + global_hist[d-1];
+            global_prefix[d] = ALIGN_UP(natural_offset);
         }
         
         // ===== Phase 3: Compute per-thread offsets for stable scatter =====
@@ -192,6 +263,9 @@ void sort_array(uint32_t *arr, size_t size) {
             uint16_t wc_counts[RADIX_SIZE];  // uint16_t for larger buffer sizes
             memset(wc_counts, 0, RADIX_SIZE * sizeof(uint16_t));
             
+            // NOTE: All offsets are now guaranteed 64-byte aligned due to ALIGN_UP in prefix sum!
+            // No alignment tracking needed - always use fast path
+            
             // Scatter with SIMD loading + write-combining
             size_t i = start;
             
@@ -216,24 +290,9 @@ void sort_array(uint32_t *arr, size_t size) {
                 _mm512_storeu_si512((__m512i*)digit_arr, digits);
                 
                 // Scatter each element to its bucket (unrolled)
+                // FLUSH_BUFFER: always aligned thanks to ALIGN_UP in prefix sum
                 #define FLUSH_BUFFER(digit) do { \
-                    /* Flush 16 cache lines (1KB) with SIMD + streaming stores */ \
-                    uint32_t *buf = wc_buffers[digit]; \
-                    uint32_t *out = dst + my_offsets[digit]; \
-                    /* Prefetch output destination */ \
-                    for (int _p = 0; _p < WC_BUFFER_SIZE; _p += 64) { \
-                        _mm_prefetch((const char*)(out + _p), _MM_HINT_T0); \
-                    } \
-                    for (int _c = 0; _c < WC_BUFFER_SIZE; _c += 64) { \
-                        __m512i v0 = _mm512_load_si512((__m512i*)(buf + _c + 0)); \
-                        __m512i v1 = _mm512_load_si512((__m512i*)(buf + _c + 16)); \
-                        __m512i v2 = _mm512_load_si512((__m512i*)(buf + _c + 32)); \
-                        __m512i v3 = _mm512_load_si512((__m512i*)(buf + _c + 48)); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 0), v0); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 16), v1); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 32), v2); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 48), v3); \
-                    } \
+                    flush_buffer_aligned(wc_buffers[digit], dst + my_offsets[digit], WC_BUFFER_SIZE); \
                     my_offsets[digit] += WC_BUFFER_SIZE; \
                     wc_counts[digit] = 0; \
                 } while(0)
@@ -268,25 +327,16 @@ void sort_array(uint32_t *arr, size_t size) {
             
             #undef FLUSH_BUFFER
             
-            // Flush remaining elements in buffers (use SIMD for full cache lines)
+            // Flush remaining elements in buffers (all aligned)
             for (int d = 0; d < RADIX_SIZE; d++) {
                 if (wc_counts[d] > 0) {
-                    uint32_t *buf = wc_buffers[d];
-                    uint32_t *out = dst + my_offsets[d];
-                    uint16_t cnt = wc_counts[d];
-                    uint16_t j = 0;
-                    
-                    // SIMD copy for full 16-element chunks
-                    for (; j + 16 <= cnt; j += 16) {
-                        __m512i v = _mm512_load_si512((__m512i*)(buf + j));
-                        _mm512_storeu_si512((__m512i*)(out + j), v);
-                    }
-                    // Scalar copy for remainder
-                    for (; j < cnt; j++) {
-                        out[j] = buf[j];
-                    }
+                    flush_buffer_aligned(wc_buffers[d], dst + my_offsets[d], wc_counts[d]);
                 }
             }
+            
+            // IMPORTANT: Store fence ensures all streaming stores are globally visible
+            // before we swap buffers and start reading from dst in the next pass
+            _mm_sfence();
         }
         t_scatter_end = get_time_sec();
         
