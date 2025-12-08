@@ -41,21 +41,26 @@ multi_sort: multi_sort.c utils.o
 sort_simd: sort_simd.c utils.o merge.o
 	$(CC) $(CFLAGS) -fopenmp sort_simd.c utils.o merge.o -o sort_simd $(LDFLAGS)
 
+# Non-SIMD version (same parallelization as sort_simd but scalar operations)
+sort_no_simd: sort_no_simd.c utils.o
+	$(CC) $(CFLAGS) -fopenmp sort_no_simd.c utils.o -o sort_no_simd $(LDFLAGS)
+
 # ============================================
 # Convenience targets
 # ============================================
 
-# Build all 4 main sorting implementations
-all: sorting improved_split multi_sort sort_simd
-	@echo "Built all 4 sorting implementations:"
+# Build all 5 main sorting implementations
+all: sorting improved_split multi_sort sort_simd sort_no_simd
+	@echo "Built all 5 sorting implementations:"
 	@echo "  sorting        - Base merge sort"
 	@echo "  improved_split - Cache-optimized merge sort"
 	@echo "  multi_sort     - Multithreaded merge sort"
 	@echo "  sort_simd      - SIMD-accelerated merge sort"
+	@echo "  sort_no_simd   - Non-SIMD (scalar) with same parallelization as sort_simd"
 
 # Clean build artifacts
 clean:
-	rm -f utils.o merge.o sorting improved_split multi_sort sort_simd
+	rm -f utils.o merge.o sorting improved_split multi_sort sort_simd sort_no_simd
 
 # Clean everything including datasets and results
 clean-all: clean
