@@ -207,7 +207,8 @@ void merge_arrays(
     __m512i left_reg = _mm512_load_epi32((__m512i*) left);
     __m512i right_reg = _mm512_load_epi32((__m512i*) right);
     merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
-    _mm512_store_epi32(arr, left_reg);
+    // STREAMING STORE: bypasses cache since output won't be read until next merge pass
+    _mm512_stream_si512((__m512i*)arr, left_reg);
     
     size_t right_idx = 16;
     size_t left_idx = 16;
@@ -237,8 +238,12 @@ void merge_arrays(
         
         // Use inline version with pre-loaded indices (avoids 3 memory loads per iteration)
         merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
-        _mm512_store_epi32(arr + left_idx + right_idx - 32, left_reg);
+        // STREAMING STORE: bypasses cache for better memory bandwidth
+        _mm512_stream_si512((__m512i*)(arr + left_idx + right_idx - 32), left_reg);
     }
+    
+    // Memory fence to ensure streaming stores are visible before we continue
+    _mm_sfence();
     
     // At this point, at least one side cannot provide a full 16-element chunk.
     // We have three sorted sequences to merge:
@@ -261,7 +266,8 @@ void merge_arrays(
     
     if (remainder_size == 0) {
         // No remainders - just output the pending 16 (aligned store)
-        _mm512_store_epi32(arr + output_pos, right_reg);
+        _mm512_stream_si512((__m512i*)(arr + output_pos), right_reg);
+        _mm_sfence();
     } else {
         // Stack buffer - max 30 elements (15 from each side worst case)
         uint32_t remainder_merged[32];
@@ -282,7 +288,7 @@ void merge_arrays(
 }
 
 // Unaligned-input version for parallel merge (inputs may be at arbitrary offsets)
-// Output MUST be 64-byte aligned (we control output buffer allocation)
+// Output is assumed to be 64-byte aligned when possible for streaming stores
 void merge_arrays_unaligned(
     uint32_t *left,
     size_t size_left,
@@ -296,6 +302,9 @@ void merge_arrays_unaligned(
         return;
     }
 
+    // Check if output is aligned for streaming stores
+    int output_aligned = ((uintptr_t)arr % 64) == 0;
+
     // Load shuffle indices ONCE before the loop
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
     const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
@@ -305,7 +314,13 @@ void merge_arrays_unaligned(
     __m512i left_reg = _mm512_loadu_epi32(left);
     __m512i right_reg = _mm512_loadu_epi32(right);
     merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
-    _mm512_storeu_epi32(arr, left_reg);  // Output may be unaligned too
+    
+    // Use streaming store if output is aligned, otherwise regular store
+    if (output_aligned) {
+        _mm512_stream_si512((__m512i*)arr, left_reg);
+    } else {
+        _mm512_storeu_epi32(arr, left_reg);
+    }
     
     size_t right_idx = 16;
     size_t left_idx = 16;
@@ -327,8 +342,18 @@ void merge_arrays_unaligned(
         right_idx += (!take_left) * 16;
         
         merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
-        _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);  // Output may be unaligned
+        
+        // Use streaming store if output position is aligned
+        uint32_t *out_ptr = arr + left_idx + right_idx - 32;
+        if (((uintptr_t)out_ptr % 64) == 0) {
+            _mm512_stream_si512((__m512i*)out_ptr, left_reg);
+        } else {
+            _mm512_storeu_epi32(out_ptr, left_reg);
+        }
     }
+    
+    // Memory fence for streaming stores
+    _mm_sfence();
     
     // Handle remainders (same as aligned version)
     size_t left_remaining = size_left - left_idx;
@@ -341,7 +366,13 @@ void merge_arrays_unaligned(
     size_t remainder_size = left_remaining + right_remaining;
     
     if (remainder_size == 0) {
-        _mm512_storeu_epi32(arr + output_pos, right_reg);  // Output may be unaligned
+        uint32_t *out_ptr = arr + output_pos;
+        if (((uintptr_t)out_ptr % 64) == 0) {
+            _mm512_stream_si512((__m512i*)out_ptr, right_reg);
+            _mm_sfence();
+        } else {
+            _mm512_storeu_epi32(out_ptr, right_reg);
+        }
     } else {
         uint32_t remainder_merged[32];
         

@@ -256,7 +256,7 @@ static inline void sort_64_simd(uint32_t *arr) {
 
 // L3 cache size: 32 MiB = 8M uint32_t elements
 // Sort entire chunks of this size before moving on (cache locality optimization)
-#define L3_CHUNK_ELEMENTS (8 * 1024 * 1024)
+#define L3_CHUNK_ELEMENTS (4 * 1024 * 1024)
 
 // Threshold for parallel merge (below this, use sequential merge)
 // 64K elements = 256KB, small enough to fit in L2 cache
@@ -402,6 +402,42 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+// Streaming copy using non-temporal stores (bypasses cache)
+// Both src and dst must be 64-byte aligned, and count must be a multiple of 16
+static inline void streaming_copy_aligned(uint32_t *dst, const uint32_t *src, size_t count) {
+    for (size_t i = 0; i < count; i += 16) {
+        __m512i data = _mm512_load_epi32(src + i);
+        _mm512_stream_si512((__m512i*)(dst + i), data);
+    }
+    _mm_sfence();  // Ensure all streaming stores complete
+}
+
+// Streaming copy for arbitrary sizes (handles non-multiple-of-16 tail)
+static inline void streaming_copy(uint32_t *dst, const uint32_t *src, size_t count) {
+    size_t i = 0;
+    // Main loop: 64 elements (256 bytes) per iteration for better throughput
+    for (; i + 64 <= count; i += 64) {
+        __m512i d0 = _mm512_load_epi32(src + i);
+        __m512i d1 = _mm512_load_epi32(src + i + 16);
+        __m512i d2 = _mm512_load_epi32(src + i + 32);
+        __m512i d3 = _mm512_load_epi32(src + i + 48);
+        _mm512_stream_si512((__m512i*)(dst + i), d0);
+        _mm512_stream_si512((__m512i*)(dst + i + 16), d1);
+        _mm512_stream_si512((__m512i*)(dst + i + 32), d2);
+        _mm512_stream_si512((__m512i*)(dst + i + 48), d3);
+    }
+    // Handle remaining full 16-element chunks
+    for (; i + 16 <= count; i += 16) {
+        __m512i data = _mm512_load_epi32(src + i);
+        _mm512_stream_si512((__m512i*)(dst + i), data);
+    }
+    _mm_sfence();  // Ensure streaming stores complete before scalar tail
+    // Handle tail (< 16 elements)
+    for (; i < count; i++) {
+        dst[i] = src[i];
+    }
+}
+
 
 
 // Sort a single chunk with ALL threads collaborating (cache-friendly)
@@ -445,7 +481,7 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 size_t right_start = left_start + left_size;
                 
                 if (right_start >= chunk_size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                    streaming_copy(dst + left_start, src + left_start, left_size);
                 } else {
                     size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
                     merge_arrays(src + left_start, left_size, 
@@ -472,12 +508,12 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
         dst = swap;
     }
     
-    // Copy result back to arr if needed - PARALLEL copy
+    // Copy result back to arr if needed - PARALLEL streaming copy
     if (src != arr) {
         #pragma omp parallel for schedule(static)
         for (size_t i = 0; i < chunk_size; i += 4096) {
             size_t copy_size = (i + 4096 <= chunk_size) ? 4096 : (chunk_size - i);
-            memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
+            streaming_copy(arr + i, src + i, copy_size);
         }
     }
 }
@@ -607,7 +643,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
                 size_t right_start = left_start + left_size;
                 
                 if (right_start >= size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                    streaming_copy(dst + left_start, src + left_start, left_size);
                 } else {
                     size_t right_size = (right_start + width <= size) ? width : (size - right_start);
                     merge_arrays(src + left_start, left_size, 
@@ -617,7 +653,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             }
             t_end = get_time_sec();
             double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %.2f GB/s)\n", 
+            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, streaming, %.2f GB/s)\n", 
                    width, t_end - t_start, num_pairs, throughput);
             
             // Swap src and dst
@@ -661,16 +697,16 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             width *= 2;
         }
         
-        // Copy result back to arr if needed - PARALLEL copy
+        // Copy result back to arr if needed - PARALLEL streaming copy
         if (src != arr) {
             t_start = get_time_sec();
             #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < size; i += 4096) {
                 size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
-                memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
+                streaming_copy(arr + i, src + i, copy_size);
             }
             t_end = get_time_sec();
-            printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
+            printf("  [Final ] Copy back (streaming): %.3f sec\n", t_end - t_start);
         }
     }
     
