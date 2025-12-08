@@ -448,19 +448,23 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                     memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
                 } else {
                     size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-                    merge_arrays(src + left_start, left_size, 
-                               src + right_start, right_size, 
-                               dst + left_start);
+                    // Use CACHED merge - keeps data in L3 for next merge pass
+                    merge_arrays_cached(src + left_start, left_size, 
+                                        src + right_start, right_size, 
+                                        dst + left_start);
                 }
             }
         } else {
             // SINGLE PAIR: Use parallel merge - only case where it helps
+            // Still use cached version since we're within L3 chunk
             size_t left_size = (width <= chunk_size) ? width : chunk_size;
             size_t right_start = left_size;
             
             if (right_start < chunk_size) {
                 size_t right_size = chunk_size - right_start;
-                parallel_merge(src, left_size, src + right_start, right_size, dst);
+                // For single large merge within L3, just use cached sequential merge
+                // (parallel_merge would use streaming stores which evict from cache)
+                merge_arrays_cached(src, left_size, src + right_start, right_size, dst);
             } else {
                 memcpy(dst, src, chunk_size * sizeof(uint32_t));
             }

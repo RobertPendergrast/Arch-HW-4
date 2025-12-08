@@ -37,7 +37,17 @@ void merge_512_registers(
     __m512i *right
 );
 
+// STREAMING version: uses non-temporal stores, best for large out-of-cache merges
 void merge_arrays(
+    uint32_t *left,
+    size_t size_left,
+    uint32_t *right,
+    size_t size_right,
+    uint32_t *arr
+);
+
+// CACHED version: uses regular stores, best for L3-resident data that will be reused
+void merge_arrays_cached(
     uint32_t *left,
     size_t size_left,
     uint32_t *right,

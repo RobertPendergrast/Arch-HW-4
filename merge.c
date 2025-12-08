@@ -185,6 +185,93 @@ void merge_local(uint32_t* left, uint32_t* right, uint32_t* arr, int size_left, 
     }
 }
 
+// CACHED version: uses regular stores to keep data in L3 cache
+// Use this for merges within L3-sized chunks where data will be reused soon
+void merge_arrays_cached(
+    uint32_t *left,
+    size_t size_left,
+    uint32_t *right,
+    size_t size_right,
+    uint32_t *arr
+) {
+    // Small arrays: fall back to scalar merge
+    if (size_left < 16 || size_right < 16) {
+        merge_local(left, right, arr, size_left, size_right);
+        return;
+    }
+
+    // OPTIMIZATION: Load shuffle indices ONCE before the loop
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
+
+    // Load from left and right arrays (aligned for cache efficiency)
+    __m512i left_reg = _mm512_load_epi32((__m512i*) left);
+    __m512i right_reg = _mm512_load_epi32((__m512i*) right);
+    merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
+    // REGULAR STORE: keeps data in cache for next merge pass
+    _mm512_store_epi32(arr, left_reg);
+    
+    size_t right_idx = 16;
+    size_t left_idx = 16;
+    
+    // Main SIMD loop: continue while BOTH sides can provide full 16-element chunks
+    while (left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
+        // Prefetch ahead to hide memory latency
+        _mm_prefetch((const char*)(left + left_idx + 64), _MM_HINT_T0);
+        _mm_prefetch((const char*)(right + right_idx + 64), _MM_HINT_T0);
+        
+        // Speculatively load both next chunks (aligned for cache efficiency)
+        __m512i next_left = _mm512_load_epi32(left + left_idx);
+        __m512i next_right = _mm512_load_epi32(right + right_idx);
+        
+        // Compare first elements to decide which chunk to use
+        unsigned int take_left = left[left_idx] <= right[right_idx];
+        
+        // Branchless select
+        __mmask16 mask = take_left ? 0xFFFF : 0x0000;
+        left_reg = _mm512_mask_blend_epi32(mask, next_right, next_left);
+        
+        // Branchless index update
+        left_idx += take_left * 16;
+        right_idx += (!take_left) * 16;
+        
+        merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
+        // REGULAR STORE: keeps data in L3 cache
+        _mm512_store_epi32(arr + left_idx + right_idx - 32, left_reg);
+    }
+    
+    // Handle remainders
+    size_t left_remaining = size_left - left_idx;
+    size_t right_remaining = size_right - right_idx;
+    size_t output_pos = left_idx + right_idx - 16;
+    
+    uint32_t pending[16];
+    _mm512_storeu_epi32(pending, right_reg);
+    
+    size_t remainder_size = left_remaining + right_remaining;
+    
+    if (remainder_size == 0) {
+        _mm512_store_epi32(arr + output_pos, right_reg);
+    } else {
+        uint32_t remainder_merged[32];
+        
+        if(left_remaining < right_remaining) {
+            merge_local(left + left_idx, pending, remainder_merged, 
+              left_remaining, 16);
+            merge_local(remainder_merged, right + right_idx, arr + output_pos, 
+              left_remaining + 16, right_remaining);
+        } else {
+            merge_local(right + right_idx, pending, remainder_merged, 
+              right_remaining, 16);
+            merge_local(remainder_merged, left + left_idx, arr + output_pos, 
+              right_remaining + 16, left_remaining);
+        }
+    }
+}
+
+// STREAMING version: uses non-temporal stores to bypass cache
+// Use this for large merges where data won't fit in cache anyway
 void merge_arrays(
     uint32_t *left,
     size_t size_left,
