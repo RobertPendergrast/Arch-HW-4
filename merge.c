@@ -305,7 +305,7 @@ void merge_arrays_unaligned(
     __m512i left_reg = _mm512_loadu_epi32(left);
     __m512i right_reg = _mm512_loadu_epi32(right);
     merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
-    _mm512_store_epi32(arr, left_reg);  // Output is aligned
+    _mm512_storeu_epi32(arr, left_reg);  // Output may be unaligned too
     
     size_t right_idx = 16;
     size_t left_idx = 16;
@@ -327,7 +327,7 @@ void merge_arrays_unaligned(
         right_idx += (!take_left) * 16;
         
         merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
-        _mm512_store_epi32(arr + left_idx + right_idx - 32, left_reg);  // Output aligned
+        _mm512_storeu_epi32(arr + left_idx + right_idx - 32, left_reg);  // Output may be unaligned
     }
     
     // Handle remainders (same as aligned version)
@@ -341,7 +341,7 @@ void merge_arrays_unaligned(
     size_t remainder_size = left_remaining + right_remaining;
     
     if (remainder_size == 0) {
-        _mm512_store_epi32(arr + output_pos, right_reg);
+        _mm512_storeu_epi32(arr + output_pos, right_reg);  // Output may be unaligned
     } else {
         uint32_t remainder_merged[32];
         

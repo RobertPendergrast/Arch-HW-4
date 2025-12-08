@@ -12,10 +12,13 @@
 // Number of threads for OpenMP parallelization
 #define NUM_THREADS 16
 
+// Forward declaration
+void basic_merge_sort(uint32_t *arr, size_t size);
+
 // Avoid making changes to this function skeleton, apart from data type changes if required
 // In this starter code we have used uint32_t, feel free to change it to any other data type if required
 void sort_array(uint32_t *arr, size_t size) {
-
+    basic_merge_sort(arr, size);
 }
 
 // Insertion sort for small/remainder arrays
