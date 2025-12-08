@@ -79,15 +79,22 @@ void split_L3_cache_for_multi_threading(uint32_t *arr, size_t size){
     // Partition Size is L3 Cache Size
     size_t partition_size = L3_CACHE_SIZE / NUM_THREADS;
     pthread_t threads[NUM_THREADS];
-
+    
     for (int i = 0; i < NUM_THREADS; i++) {
+        // What the block has little data?
+        if (i*partition_size > size){
+            break;
+        }
         ThreadArgs *args = malloc(sizeof(*args));
         args->arr = arr + i*partition_size;
         if (i == NUM_THREADS - 1) {
             partition_size = size - i*partition_size;
         } 
+        if (size < partition_size){
+            partition_size = size;
+        }
         args->size = partition_size;  
-        print_array(args->arr, args->size);
+        //print_array(args->arr, args->size);
         pthread_create(&threads[i],NULL,single_thread_sort_wrapper, args);
     }
 
@@ -99,31 +106,54 @@ void split_L3_cache_for_multi_threading(uint32_t *arr, size_t size){
 }
 
 // Return a whole sorted l3 cache
+// This might not be the full cache size though!
 void sort_l3_cache_sized(uint32_t *arr, size_t size){
-    // This will return the an l3 cached split into N threads sorted partitions
+    
+    // First split the array and sort them in parallel
     split_L3_cache_for_multi_threading(arr, size);
+
+    // Then merge the sorted partitions
+    // Right now just do pairwise merging
+    size_t max_partition_size = L3_CACHE_SIZE / NUM_THREADS;
+    int num_partitions = (size + max_partition_size -1) / max_partition_size; 
+    
+    for (int i = 1; i< num_partitions; i*=2) { // Logarithmic scaling
+
+        // Merge pairs of partitions in place
+        for (int j = 0; j < num_partitions; j += 2) {
+            // TODO: Actually merge the partitions
+        }  
+    }
+}
+
+// Merge multiple cache sizes (rehash the k-way merge)
+void merge_multiple_l3_cached_sizes(uint32_t *arr, size_t size){
+    // TODO: Do this lmao
 }
 
 int main(int argc, char *argv[]) {
     // Read array from input file
     uint64_t size;
     //uint32_t *arr = read_array_from_file(argv[1], &size);
-    uint32_t arr[] = {9, 5, 2, 4, 
-                      7, 1, 3, 6, 
-                      12, 15, 11, 14, 
-                      10, 8, 13, 0, 
-
-                      9, 5, 2, 4, 
-                      7, 1, 3, 6, 
-                      12, 15, 11, 14, 
-                      10, 8, 13, 0, 
-
-                      9, 5, 2, 4, 
-                      7, 1, 3, 6, 
-                      12, 15, 11, 14, 
-                      10, 8, 13, 0, 
-
-                      9};  // 64 elements, each group of 16 will be sorted in a thread
+    uint32_t arr[] = {1, 4, 8, 5, 
+                    16, 12, 7, 3, 
+                    2, 11, 10, 9,
+                    6, 15, 13, 14,
+                
+                    1, 4, 8, 5, 
+                    16, 12, 7, 3, 
+                    2, 11, 10, 9,
+                    6, 15, 13, 14,
+                
+                    1, 4, 8, 5, 
+                    16, 12, 7, 3, 
+                    2, 11, 10, 9,
+                    6, 15, 13, 14,
+                
+                    1, 4, 8, 5, 
+                    16, 12, 7, 3, 
+                    2, 11, 10, 9,
+                    6, 15, 13, 14};  // 64 elements, each group of 16 will be sorted in a thread
     size = sizeof(arr) / sizeof(arr[0]);
 
     split_L3_cache_for_multi_threading(arr, size);
