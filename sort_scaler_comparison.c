@@ -34,7 +34,7 @@ static inline void insertion_sort(uint32_t *arr, size_t size) {
 
 // ============== Stable branchless merge (uses <= for stability) ==============
 // Uses conditional moves to avoid branch mispredictions (~15-20 cycle penalty each)
-// With prefetching to hide memory latency
+// With prefetching and streaming stores
 static void stable_merge(uint32_t *left, size_t size_left,
                          uint32_t *right, size_t size_right,
                          uint32_t *out) {
@@ -56,18 +56,23 @@ static void stable_merge(uint32_t *left, size_t size_left,
         uint32_t r_val = right[j];
         
         // Compute mask: 0xFFFFFFFF if take_left, 0x00000000 otherwise
-        // Use unsigned comparison for stability: l_val <= r_val means take left
         uint32_t cmp = (l_val <= r_val);  // 1 or 0
         uint32_t mask = -cmp;              // 0xFFFFFFFF or 0x00000000
         
         // Branchless select: (l_val & mask) | (r_val & ~mask)
-        out[k] = (l_val & mask) | (r_val & ~mask);
+        uint32_t result = (l_val & mask) | (r_val & ~mask);
+        
+        // Streaming store - bypass cache (output won't be read until next stage)
+        _mm_stream_si32((int*)(out + k), result);
         
         // Branchless index updates
         i += cmp;
         j += (1 - cmp);
         k++;
     }
+    
+    // Memory fence to ensure streaming stores complete before memcpy
+    _mm_sfence();
     
     // Copy remaining elements
     if (i < size_left) {
@@ -80,7 +85,7 @@ static void stable_merge(uint32_t *left, size_t size_left,
 
 // ============== Interleaved merge: 2 independent merges per thread ==============
 // Gives CPU more independent work to hide latency
-// With prefetching to hide memory latency
+// With prefetching and streaming stores
 #define PREFETCH_DIST 64  // Prefetch 64 elements ahead (~256 bytes, 4 cache lines)
 
 static void stable_merge_interleaved_2(
@@ -111,36 +116,41 @@ static void stable_merge_interleaved_2(
         uint32_t l0 = left0[i0], r0 = right0[j0];
         uint32_t cmp0 = (l0 <= r0);
         uint32_t mask0 = -cmp0;
-        out0[k0] = (l0 & mask0) | (r0 & ~mask0);
+        _mm_stream_si32((int*)(out0 + k0), (l0 & mask0) | (r0 & ~mask0));
         i0 += cmp0; j0 += (1 - cmp0); k0++;
         
         // Merge 1: one step (independent, can execute in parallel)
         uint32_t l1 = left1[i1], r1 = right1[j1];
         uint32_t cmp1 = (l1 <= r1);
         uint32_t mask1 = -cmp1;
-        out1[k1] = (l1 & mask1) | (r1 & ~mask1);
+        _mm_stream_si32((int*)(out1 + k1), (l1 & mask1) | (r1 & ~mask1));
         i1 += cmp1; j1 += (1 - cmp1); k1++;
     }
     
-    // Finish merge 0
+    // Finish merge 0 with streaming stores
     while (i0 < size_left0 && j0 < size_right0) {
         uint32_t l0 = left0[i0], r0 = right0[j0];
         uint32_t cmp0 = (l0 <= r0);
         uint32_t mask0 = -cmp0;
-        out0[k0++] = (l0 & mask0) | (r0 & ~mask0);
-        i0 += cmp0; j0 += (1 - cmp0);
+        _mm_stream_si32((int*)(out0 + k0), (l0 & mask0) | (r0 & ~mask0));
+        i0 += cmp0; j0 += (1 - cmp0); k0++;
     }
-    if (i0 < size_left0) memcpy(out0 + k0, left0 + i0, (size_left0 - i0) * sizeof(uint32_t));
-    if (j0 < size_right0) memcpy(out0 + k0, right0 + j0, (size_right0 - j0) * sizeof(uint32_t));
     
-    // Finish merge 1
+    // Finish merge 1 with streaming stores
     while (i1 < size_left1 && j1 < size_right1) {
         uint32_t l1 = left1[i1], r1 = right1[j1];
         uint32_t cmp1 = (l1 <= r1);
         uint32_t mask1 = -cmp1;
-        out1[k1++] = (l1 & mask1) | (r1 & ~mask1);
-        i1 += cmp1; j1 += (1 - cmp1);
+        _mm_stream_si32((int*)(out1 + k1), (l1 & mask1) | (r1 & ~mask1));
+        i1 += cmp1; j1 += (1 - cmp1); k1++;
     }
+    
+    // Memory fence before memcpy (which uses regular stores)
+    _mm_sfence();
+    
+    // Copy remaining elements
+    if (i0 < size_left0) memcpy(out0 + k0, left0 + i0, (size_left0 - i0) * sizeof(uint32_t));
+    if (j0 < size_right0) memcpy(out0 + k0, right0 + j0, (size_right0 - j0) * sizeof(uint32_t));
     if (i1 < size_left1) memcpy(out1 + k1, left1 + i1, (size_left1 - i1) * sizeof(uint32_t));
     if (j1 < size_right1) memcpy(out1 + k1, right1 + j1, (size_right1 - j1) * sizeof(uint32_t));
 }
