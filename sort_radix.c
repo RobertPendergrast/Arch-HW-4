@@ -91,8 +91,10 @@ void sort_array(uint32_t *arr, size_t size) {
     uint32_t *src = arr;
     uint32_t *dst = temp;
     
-    // Process each byte (4 passes for 32-bit integers)
-    for (int pass = 0; pass < 4; pass++) {
+    // Process in passes based on radix size
+    // 8-bit radix = 4 passes, 11-bit radix = 3 passes, 16-bit radix = 2 passes
+    int num_passes = (32 + RADIX_BITS - 1) / RADIX_BITS;  // ceil(32 / RADIX_BITS)
+    for (int pass = 0; pass < num_passes; pass++) {
         double t_pass_start = get_time_sec();
         double t_hist_start, t_hist_end;
         double t_prefix_start, t_prefix_end;
@@ -419,6 +421,14 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     printf("Sorting took %.3f seconds\n", elapsed);
+    
+    // Calculate total memory bandwidth utilization
+    int num_passes = (32 + RADIX_BITS - 1) / RADIX_BITS;  // ceil(32 / RADIX_BITS)
+    double total_bytes = (double)size * sizeof(uint32_t) * 2 * num_passes;  // read + write per pass
+    double effective_bw = total_bytes / elapsed / 1e9;
+    printf("Total data movement: %.1f GB (%d passes × %.1f GB × 2)\n", 
+           total_bytes / 1e9, num_passes, (double)size * sizeof(uint32_t) / 1e9);
+    printf("Effective bandwidth: %.1f GB/s (compare to your memory bandwidth test)\n", effective_bw);
 
     // Compute hash after sorting
     uint64_t xor_after, sum_after;
