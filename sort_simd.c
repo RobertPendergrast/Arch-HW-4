@@ -663,11 +663,12 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             width *= 2;
         }
         
-        // Finish remaining merges sequentially (few pairs left)
+        // Finish remaining merges using PARALLEL MERGE (all threads collaborate on each merge)
         while (width < size) {
             t_start = get_time_sec();
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
             
+            // Process each pair with all threads collaborating via parallel_merge
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
                 if (left_start >= size) continue;
@@ -676,19 +677,25 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
                 size_t right_start = left_start + left_size;
                 
                 if (right_start >= size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                    // No right side - just copy with streaming stores
+                    #pragma omp parallel for schedule(static)
+                    for (size_t i = 0; i < left_size; i += 4096) {
+                        size_t copy_size = (i + 4096 <= left_size) ? 4096 : (left_size - i);
+                        streaming_copy(dst + left_start + i, src + left_start + i, copy_size);
+                    }
                 } else {
                     size_t right_size = (right_start + width <= size) ? width : (size - right_start);
-                    merge_arrays(src + left_start, left_size, 
-                               src + right_start, right_size, 
-                               dst + left_start);
+                    // Use parallel merge - all threads collaborate on this single merge
+                    parallel_merge(src + left_start, left_size, 
+                                   src + right_start, right_size, 
+                                   dst + left_start);
                 }
             }
             
             t_end = get_time_sec();
             double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu sequential merges, %.2f GB/s)\n", 
-                   width, t_end - t_start, num_pairs, throughput);
+            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %d threads each, %.2f GB/s)\n", 
+                   width, t_end - t_start, num_pairs, NUM_THREADS, throughput);
             
             // Swap src and dst
             uint32_t *swap = src;
