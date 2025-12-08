@@ -288,7 +288,8 @@ void merge_arrays(
 }
 
 // Unaligned-input version for parallel merge (inputs may be at arbitrary offsets)
-// Output is assumed to be 64-byte aligned when possible for streaming stores
+// Uses alignment preamble: write a few elements with regular stores to reach
+// 64-byte alignment, then use streaming stores for the rest.
 void merge_arrays_unaligned(
     uint32_t *left,
     size_t size_left,
@@ -302,30 +303,65 @@ void merge_arrays_unaligned(
         return;
     }
 
-    // Check if output is aligned for streaming stores
-    int output_aligned = ((uintptr_t)arr % 64) == 0;
-
+    size_t left_idx = 0;
+    size_t right_idx = 0;
+    size_t out_idx = 0;
+    
+    // ===== ALIGNMENT PREAMBLE =====
+    // Calculate how many elements until next 64-byte boundary
+    size_t misalign_bytes = (uintptr_t)arr % 64;
+    size_t preamble_count = 0;
+    if (misalign_bytes != 0) {
+        preamble_count = (64 - misalign_bytes) / sizeof(uint32_t);  // Elements to reach alignment
+        
+        // Scalar merge for preamble (small, so overhead is minimal)
+        while (out_idx < preamble_count && left_idx < size_left && right_idx < size_right) {
+            if (left[left_idx] <= right[right_idx]) {
+                arr[out_idx++] = left[left_idx++];
+            } else {
+                arr[out_idx++] = right[right_idx++];
+            }
+        }
+        // Handle case where one side exhausted during preamble
+        while (out_idx < preamble_count && left_idx < size_left) {
+            arr[out_idx++] = left[left_idx++];
+        }
+        while (out_idx < preamble_count && right_idx < size_right) {
+            arr[out_idx++] = right[right_idx++];
+        }
+    }
+    
+    // Now arr + out_idx is 64-byte aligned!
+    // Check if we have enough elements left for SIMD
+    size_t left_remaining = size_left - left_idx;
+    size_t right_remaining = size_right - right_idx;
+    
+    if (left_remaining < 16 || right_remaining < 16) {
+        // Not enough for SIMD, finish with scalar
+        merge_local(left + left_idx, right + right_idx, arr + out_idx, 
+                    left_remaining, right_remaining);
+        return;
+    }
+    
+    // ===== ALIGNED SIMD MERGE WITH STREAMING STORES =====
     // Load shuffle indices ONCE before the loop
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
     const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
     const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
-    // UNALIGNED loads from left and right (they may be at arbitrary offsets)
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
+    // UNALIGNED loads from left and right (inputs may be at arbitrary offsets)
+    __m512i left_reg = _mm512_loadu_epi32(left + left_idx);
+    __m512i right_reg = _mm512_loadu_epi32(right + right_idx);
     merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
     
-    // Use streaming store if output is aligned, otherwise regular store
-    if (output_aligned) {
-        _mm512_stream_si512((__m512i*)arr, left_reg);
-    } else {
-        _mm512_storeu_epi32(arr, left_reg);
-    }
+    // Output is now aligned - use streaming store!
+    _mm512_stream_si512((__m512i*)(arr + out_idx), left_reg);
     
-    size_t right_idx = 16;
-    size_t left_idx = 16;
+    left_idx += 16;
+    right_idx += 16;
+    out_idx += 16;
     
-    // Main SIMD loop with UNALIGNED input loads
+    // Main SIMD loop - output stays aligned since we write 64 bytes (16 elements) at a time
     while (left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
         _mm_prefetch((const char*)(left + left_idx + 64), _MM_HINT_T0);
         _mm_prefetch((const char*)(right + right_idx + 64), _MM_HINT_T0);
@@ -343,49 +379,42 @@ void merge_arrays_unaligned(
         
         merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
         
-        // Use streaming store if output position is aligned
-        uint32_t *out_ptr = arr + left_idx + right_idx - 32;
-        if (((uintptr_t)out_ptr % 64) == 0) {
-            _mm512_stream_si512((__m512i*)out_ptr, left_reg);
-        } else {
-            _mm512_storeu_epi32(out_ptr, left_reg);
-        }
+        // STREAMING STORE - output is aligned!
+        _mm512_stream_si512((__m512i*)(arr + out_idx), left_reg);
+        out_idx += 16;
     }
     
     // Memory fence for streaming stores
     _mm_sfence();
     
-    // Handle remainders (same as aligned version)
-    size_t left_remaining = size_left - left_idx;
-    size_t right_remaining = size_right - right_idx;
-    size_t output_pos = left_idx + right_idx - 16;
+    // ===== HANDLE REMAINDERS =====
+    left_remaining = size_left - left_idx;
+    right_remaining = size_right - right_idx;
     
+    // Extract the 16 pending elements from right_reg
     uint32_t pending[16];
     _mm512_storeu_epi32(pending, right_reg);
     
     size_t remainder_size = left_remaining + right_remaining;
     
     if (remainder_size == 0) {
-        uint32_t *out_ptr = arr + output_pos;
-        if (((uintptr_t)out_ptr % 64) == 0) {
-            _mm512_stream_si512((__m512i*)out_ptr, right_reg);
-            _mm_sfence();
-        } else {
-            _mm512_storeu_epi32(out_ptr, right_reg);
-        }
+        // No remainders - just output the pending 16
+        _mm512_stream_si512((__m512i*)(arr + out_idx), right_reg);
+        _mm_sfence();
     } else {
+        // Stack buffer for merging remainders
         uint32_t remainder_merged[32];
         
-        if(left_remaining < right_remaining) {
+        if (left_remaining < right_remaining) {
             merge_local(left + left_idx, pending, remainder_merged, 
-              left_remaining, 16);
-            merge_local(remainder_merged, right + right_idx, arr + output_pos, 
-              left_remaining + 16, right_remaining);
+                        left_remaining, 16);
+            merge_local(remainder_merged, right + right_idx, arr + out_idx, 
+                        left_remaining + 16, right_remaining);
         } else {
             merge_local(right + right_idx, pending, remainder_merged, 
-              right_remaining, 16);
-            merge_local(remainder_merged, left + left_idx, arr + output_pos, 
-              right_remaining + 16, left_remaining);
+                        right_remaining, 16);
+            merge_local(remainder_merged, left + left_idx, arr + out_idx, 
+                        right_remaining + 16, left_remaining);
         }
     }
 }
