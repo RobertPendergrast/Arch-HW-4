@@ -34,13 +34,24 @@ static inline void insertion_sort(uint32_t *arr, size_t size) {
 
 // ============== Stable branchless merge (uses <= for stability) ==============
 // Uses conditional moves to avoid branch mispredictions (~15-20 cycle penalty each)
+// With prefetching to hide memory latency
 static void stable_merge(uint32_t *left, size_t size_left,
                          uint32_t *right, size_t size_right,
                          uint32_t *out) {
     size_t i = 0, j = 0, k = 0;
     
+    // Initial prefetch
+    _mm_prefetch((const char*)(left), _MM_HINT_T0);
+    _mm_prefetch((const char*)(right), _MM_HINT_T0);
+    
     // Main branchless loop - avoid branch misprediction penalty
     while (i < size_left && j < size_right) {
+        // Prefetch ahead every 16 elements
+        if ((k & 15) == 0) {
+            _mm_prefetch((const char*)(left + i + 64), _MM_HINT_T0);
+            _mm_prefetch((const char*)(right + j + 64), _MM_HINT_T0);
+        }
+        
         uint32_t l_val = left[i];
         uint32_t r_val = right[j];
         
@@ -67,82 +78,71 @@ static void stable_merge(uint32_t *left, size_t size_left,
     }
 }
 
-// ============== Interleaved merge: 4 independent merges per thread ==============
+// ============== Interleaved merge: 2 independent merges per thread ==============
 // Gives CPU more independent work to hide latency
-typedef struct {
-    uint32_t *left, *right, *out;
-    size_t size_left, size_right;
-    size_t i, j, k;
-} merge_state_t;
+// With prefetching to hide memory latency
+#define PREFETCH_DIST 64  // Prefetch 64 elements ahead (~256 bytes, 4 cache lines)
 
-static inline void finish_merge(merge_state_t *m) {
-    while (m->i < m->size_left && m->j < m->size_right) {
-        uint32_t l = m->left[m->i], r = m->right[m->j];
-        uint32_t cmp = (l <= r);
-        uint32_t mask = -cmp;
-        m->out[m->k++] = (l & mask) | (r & ~mask);
-        m->i += cmp; m->j += (1 - cmp);
-    }
-    if (m->i < m->size_left) 
-        memcpy(m->out + m->k, m->left + m->i, (m->size_left - m->i) * sizeof(uint32_t));
-    if (m->j < m->size_right) 
-        memcpy(m->out + m->k, m->right + m->j, (m->size_right - m->j) * sizeof(uint32_t));
-}
-
-static void stable_merge_interleaved_4(
+static void stable_merge_interleaved_2(
     uint32_t *left0, size_t size_left0, uint32_t *right0, size_t size_right0, uint32_t *out0,
-    uint32_t *left1, size_t size_left1, uint32_t *right1, size_t size_right1, uint32_t *out1,
-    uint32_t *left2, size_t size_left2, uint32_t *right2, size_t size_right2, uint32_t *out2,
-    uint32_t *left3, size_t size_left3, uint32_t *right3, size_t size_right3, uint32_t *out3
+    uint32_t *left1, size_t size_left1, uint32_t *right1, size_t size_right1, uint32_t *out1
 ) {
     size_t i0 = 0, j0 = 0, k0 = 0;
     size_t i1 = 0, j1 = 0, k1 = 0;
-    size_t i2 = 0, j2 = 0, k2 = 0;
-    size_t i3 = 0, j3 = 0, k3 = 0;
     
-    // Interleaved loop - work on all 4 merges alternately
+    // Initial prefetch burst
+    _mm_prefetch((const char*)(left0), _MM_HINT_T0);
+    _mm_prefetch((const char*)(right0), _MM_HINT_T0);
+    _mm_prefetch((const char*)(left1), _MM_HINT_T0);
+    _mm_prefetch((const char*)(right1), _MM_HINT_T0);
+    
+    // Interleaved loop - work on both merges alternately
     while ((i0 < size_left0 && j0 < size_right0) && 
-           (i1 < size_left1 && j1 < size_right1) &&
-           (i2 < size_left2 && j2 < size_right2) &&
-           (i3 < size_left3 && j3 < size_right3)) {
-        // Merge 0
+           (i1 < size_left1 && j1 < size_right1)) {
+        // Prefetch ahead every 16 iterations (1 cache line worth of output)
+        if ((k0 & 15) == 0) {
+            _mm_prefetch((const char*)(left0 + i0 + PREFETCH_DIST), _MM_HINT_T0);
+            _mm_prefetch((const char*)(right0 + j0 + PREFETCH_DIST), _MM_HINT_T0);
+            _mm_prefetch((const char*)(left1 + i1 + PREFETCH_DIST), _MM_HINT_T0);
+            _mm_prefetch((const char*)(right1 + j1 + PREFETCH_DIST), _MM_HINT_T0);
+        }
+        
+        // Merge 0: one step
         uint32_t l0 = left0[i0], r0 = right0[j0];
         uint32_t cmp0 = (l0 <= r0);
         uint32_t mask0 = -cmp0;
         out0[k0] = (l0 & mask0) | (r0 & ~mask0);
         i0 += cmp0; j0 += (1 - cmp0); k0++;
         
-        // Merge 1
+        // Merge 1: one step (independent, can execute in parallel)
         uint32_t l1 = left1[i1], r1 = right1[j1];
         uint32_t cmp1 = (l1 <= r1);
         uint32_t mask1 = -cmp1;
         out1[k1] = (l1 & mask1) | (r1 & ~mask1);
         i1 += cmp1; j1 += (1 - cmp1); k1++;
-        
-        // Merge 2
-        uint32_t l2 = left2[i2], r2 = right2[j2];
-        uint32_t cmp2 = (l2 <= r2);
-        uint32_t mask2 = -cmp2;
-        out2[k2] = (l2 & mask2) | (r2 & ~mask2);
-        i2 += cmp2; j2 += (1 - cmp2); k2++;
-        
-        // Merge 3
-        uint32_t l3 = left3[i3], r3 = right3[j3];
-        uint32_t cmp3 = (l3 <= r3);
-        uint32_t mask3 = -cmp3;
-        out3[k3] = (l3 & mask3) | (r3 & ~mask3);
-        i3 += cmp3; j3 += (1 - cmp3); k3++;
     }
     
-    // Finish remaining merges
-    merge_state_t m0 = {left0, right0, out0, size_left0, size_right0, i0, j0, k0};
-    merge_state_t m1 = {left1, right1, out1, size_left1, size_right1, i1, j1, k1};
-    merge_state_t m2 = {left2, right2, out2, size_left2, size_right2, i2, j2, k2};
-    merge_state_t m3 = {left3, right3, out3, size_left3, size_right3, i3, j3, k3};
-    finish_merge(&m0);
-    finish_merge(&m1);
-    finish_merge(&m2);
-    finish_merge(&m3);
+    // Finish merge 0
+    while (i0 < size_left0 && j0 < size_right0) {
+        uint32_t l0 = left0[i0], r0 = right0[j0];
+        uint32_t cmp0 = (l0 <= r0);
+        uint32_t mask0 = -cmp0;
+        out0[k0++] = (l0 & mask0) | (r0 & ~mask0);
+        i0 += cmp0; j0 += (1 - cmp0);
+    }
+    if (i0 < size_left0) memcpy(out0 + k0, left0 + i0, (size_left0 - i0) * sizeof(uint32_t));
+    if (j0 < size_right0) memcpy(out0 + k0, right0 + j0, (size_right0 - j0) * sizeof(uint32_t));
+    
+    // Finish merge 1
+    while (i1 < size_left1 && j1 < size_right1) {
+        uint32_t l1 = left1[i1], r1 = right1[j1];
+        uint32_t cmp1 = (l1 <= r1);
+        uint32_t mask1 = -cmp1;
+        out1[k1++] = (l1 & mask1) | (r1 & ~mask1);
+        i1 += cmp1; j1 += (1 - cmp1);
+    }
+    if (i1 < size_left1) memcpy(out1 + k1, left1 + i1, (size_left1 - i1) * sizeof(uint32_t));
+    if (j1 < size_right1) memcpy(out1 + k1, right1 + j1, (size_right1 - j1) * sizeof(uint32_t));
 }
 
 // ============== Parallel merge using median splitting ==============
@@ -296,47 +296,53 @@ void sort_array(uint32_t *arr, size_t size) {
         size_t num_merges = (size + 2 * run_size - 1) / (2 * run_size);
         
         if (num_merges >= PARALLEL_MERGE_THRESHOLD) {
-            // Many merges: use interleaved merge (4 merges per thread iteration)
-            // This hides latency by giving CPU 4 independent work streams
-            size_t quad_stride = 8 * run_size;  // Each iteration handles 4 merge pairs
+            // Many merges: use interleaved merge (2 merges per thread iteration)
+            // This hides latency by giving CPU independent work streams
+            size_t pair_stride = 4 * run_size;  // Each iteration handles 2 merge pairs
             
             #pragma omp parallel for schedule(dynamic)
-            for (size_t i = 0; i < size; i += quad_stride) {
-                // Calculate all 4 merge pairs
-                size_t base[4] = {i, i + 2*run_size, i + 4*run_size, i + 6*run_size};
-                size_t left_start[4], left_size[4], right_start[4], right_size[4];
-                int valid[4] = {0, 0, 0, 0};
+            for (size_t i = 0; i < size; i += pair_stride) {
+                // Merge pair 0
+                size_t left_start0 = i;
+                size_t left_end0 = (i + run_size < size) ? i + run_size : size;
+                size_t right_start0 = left_end0;
+                size_t right_end0 = (i + 2 * run_size < size) ? i + 2 * run_size : size;
+                size_t left_size0 = left_end0 - left_start0;
+                size_t right_size0 = right_end0 - right_start0;
                 
-                for (int m = 0; m < 4; m++) {
-                    if (base[m] < size) {
-                        left_start[m] = base[m];
-                        size_t left_end = (base[m] + run_size < size) ? base[m] + run_size : size;
-                        left_size[m] = left_end - left_start[m];
-                        right_start[m] = left_end;
-                        size_t right_end = (base[m] + 2*run_size < size) ? base[m] + 2*run_size : size;
-                        right_size[m] = (right_start[m] < size) ? right_end - right_start[m] : 0;
-                        valid[m] = (right_size[m] > 0);  // Valid merge if right side exists
-                    }
-                }
+                // Merge pair 1 (next pair, if exists)
+                size_t base1 = i + 2 * run_size;
+                size_t left_start1 = base1;
+                size_t left_end1 = (base1 + run_size < size) ? base1 + run_size : size;
+                size_t right_start1 = left_end1;
+                size_t right_end1 = (base1 + 2 * run_size < size) ? base1 + 2 * run_size : size;
+                size_t left_size1 = (base1 < size) ? left_end1 - left_start1 : 0;
+                size_t right_size1 = (right_start1 < size) ? right_end1 - right_start1 : 0;
                 
-                // Check if all 4 are valid merges
-                if (valid[0] && valid[1] && valid[2] && valid[3]) {
-                    stable_merge_interleaved_4(
-                        src + left_start[0], left_size[0], src + right_start[0], right_size[0], dst + left_start[0],
-                        src + left_start[1], left_size[1], src + right_start[1], right_size[1], dst + left_start[1],
-                        src + left_start[2], left_size[2], src + right_start[2], right_size[2], dst + left_start[2],
-                        src + left_start[3], left_size[3], src + right_start[3], right_size[3], dst + left_start[3]
+                // Check if we have two valid merge pairs
+                if (left_size1 > 0 && right_size0 > 0 && right_size1 > 0) {
+                    // Both pairs are complete merges - use interleaved
+                    stable_merge_interleaved_2(
+                        src + left_start0, left_size0, src + right_start0, right_size0, dst + left_start0,
+                        src + left_start1, left_size1, src + right_start1, right_size1, dst + left_start1
                     );
                 } else {
-                    // Handle remaining merges individually
-                    for (int m = 0; m < 4; m++) {
-                        if (base[m] >= size) continue;
-                        if (right_size[m] == 0) {
-                            memcpy(dst + left_start[m], src + left_start[m], left_size[m] * sizeof(uint32_t));
+                    // Handle pair 0
+                    if (right_size0 == 0) {
+                        memcpy(dst + left_start0, src + left_start0, left_size0 * sizeof(uint32_t));
+                    } else {
+                        stable_merge(src + left_start0, left_size0,
+                                   src + right_start0, right_size0,
+                                   dst + left_start0);
+                    }
+                    // Handle pair 1 if it exists
+                    if (left_size1 > 0) {
+                        if (right_size1 == 0) {
+                            memcpy(dst + left_start1, src + left_start1, left_size1 * sizeof(uint32_t));
                         } else {
-                            stable_merge(src + left_start[m], left_size[m],
-                                       src + right_start[m], right_size[m],
-                                       dst + left_start[m]);
+                            stable_merge(src + left_start1, left_size1,
+                                       src + right_start1, right_size1,
+                                       dst + left_start1);
                         }
                     }
                 }
