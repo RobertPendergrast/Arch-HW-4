@@ -370,6 +370,231 @@ static inline void insertion_sort_64(uint64_t *arr, size_t size) {
     }
 }
 
+// ============== Parallel Merge for 64-bit keys ==============
+// Uses binary search to split work across multiple threads
+
+#define PARALLEL_MERGE_THRESHOLD_64 (32 * 1024)  // 32K elements minimum for parallel merge
+
+// Unaligned version of merge for parallel splitting (inputs may be at arbitrary offsets)
+static void merge_arrays_64_unaligned(uint64_t *left, size_t size_left,
+                                       uint64_t *right, size_t size_right,
+                                       uint64_t *out) {
+    // Small arrays: use scalar stable merge
+    if (size_left < 8 || size_right < 8) {
+        merge_local_64(left, right, out, size_left, size_right);
+        return;
+    }
+    
+    const __m512i idx_rev = _mm512_load_epi64(IDX64_REV);
+    const __m512i swap4 = _mm512_load_epi64(SORT64_SWAP4_IDX);
+    const __m512i swap2 = _mm512_load_epi64(SORT64_SWAP2_IDX);
+    const __m512i swap1 = _mm512_load_epi64(SORT64_SWAP1_IDX);
+    
+    // UNALIGNED loads from inputs
+    __m512i left_reg = _mm512_loadu_epi64(left);
+    __m512i right_reg = _mm512_loadu_epi64(right);
+    
+    // Initial merge
+    right_reg = _mm512_permutexvar_epi64(idx_rev, right_reg);
+    __m512i lo = _mm512_min_epu64(left_reg, right_reg);
+    __m512i hi = _mm512_max_epu64(left_reg, right_reg);
+    left_reg = lo;
+    right_reg = hi;
+    
+    // Bitonic clean left_reg
+    __m512i shuf = _mm512_permutexvar_epi64(swap4, left_reg);
+    lo = _mm512_min_epu64(left_reg, shuf);
+    hi = _mm512_max_epu64(left_reg, shuf);
+    left_reg = _mm512_mask_blend_epi64(0xF0, lo, hi);
+    
+    shuf = _mm512_permutexvar_epi64(swap2, left_reg);
+    lo = _mm512_min_epu64(left_reg, shuf);
+    hi = _mm512_max_epu64(left_reg, shuf);
+    left_reg = _mm512_mask_blend_epi64(0xCC, lo, hi);
+    
+    shuf = _mm512_permutexvar_epi64(swap1, left_reg);
+    lo = _mm512_min_epu64(left_reg, shuf);
+    hi = _mm512_max_epu64(left_reg, shuf);
+    left_reg = _mm512_mask_blend_epi64(0xAA, lo, hi);
+    
+    _mm512_store_epi64(out, left_reg);  // Output is aligned
+    
+    // Bitonic clean right_reg
+    shuf = _mm512_permutexvar_epi64(swap4, right_reg);
+    lo = _mm512_min_epu64(right_reg, shuf);
+    hi = _mm512_max_epu64(right_reg, shuf);
+    right_reg = _mm512_mask_blend_epi64(0xF0, lo, hi);
+    
+    shuf = _mm512_permutexvar_epi64(swap2, right_reg);
+    lo = _mm512_min_epu64(right_reg, shuf);
+    hi = _mm512_max_epu64(right_reg, shuf);
+    right_reg = _mm512_mask_blend_epi64(0xCC, lo, hi);
+    
+    shuf = _mm512_permutexvar_epi64(swap1, right_reg);
+    lo = _mm512_min_epu64(right_reg, shuf);
+    hi = _mm512_max_epu64(right_reg, shuf);
+    right_reg = _mm512_mask_blend_epi64(0xAA, lo, hi);
+    
+    size_t left_idx = 8;
+    size_t right_idx = 8;
+    
+    // Main merge loop with UNALIGNED input loads
+    while (left_idx + 8 <= size_left && right_idx + 8 <= size_right) {
+        __m512i next_left = _mm512_loadu_epi64(left + left_idx);
+        __m512i next_right = _mm512_loadu_epi64(right + right_idx);
+        
+        int take_left = left[left_idx] <= right[right_idx];
+        __mmask8 mask = take_left ? 0xFF : 0x00;
+        left_reg = _mm512_mask_blend_epi64(mask, next_right, next_left);
+        
+        left_idx += take_left * 8;
+        right_idx += (!take_left) * 8;
+        
+        left_reg = _mm512_permutexvar_epi64(idx_rev, left_reg);
+        lo = _mm512_min_epu64(left_reg, right_reg);
+        hi = _mm512_max_epu64(left_reg, right_reg);
+        left_reg = lo;
+        right_reg = hi;
+        
+        shuf = _mm512_permutexvar_epi64(swap4, left_reg);
+        lo = _mm512_min_epu64(left_reg, shuf);
+        hi = _mm512_max_epu64(left_reg, shuf);
+        left_reg = _mm512_mask_blend_epi64(0xF0, lo, hi);
+        
+        shuf = _mm512_permutexvar_epi64(swap2, left_reg);
+        lo = _mm512_min_epu64(left_reg, shuf);
+        hi = _mm512_max_epu64(left_reg, shuf);
+        left_reg = _mm512_mask_blend_epi64(0xCC, lo, hi);
+        
+        shuf = _mm512_permutexvar_epi64(swap1, left_reg);
+        lo = _mm512_min_epu64(left_reg, shuf);
+        hi = _mm512_max_epu64(left_reg, shuf);
+        left_reg = _mm512_mask_blend_epi64(0xAA, lo, hi);
+        
+        _mm512_store_epi64(out + left_idx + right_idx - 16, left_reg);
+        
+        shuf = _mm512_permutexvar_epi64(swap4, right_reg);
+        lo = _mm512_min_epu64(right_reg, shuf);
+        hi = _mm512_max_epu64(right_reg, shuf);
+        right_reg = _mm512_mask_blend_epi64(0xF0, lo, hi);
+        
+        shuf = _mm512_permutexvar_epi64(swap2, right_reg);
+        lo = _mm512_min_epu64(right_reg, shuf);
+        hi = _mm512_max_epu64(right_reg, shuf);
+        right_reg = _mm512_mask_blend_epi64(0xCC, lo, hi);
+        
+        shuf = _mm512_permutexvar_epi64(swap1, right_reg);
+        lo = _mm512_min_epu64(right_reg, shuf);
+        hi = _mm512_max_epu64(right_reg, shuf);
+        right_reg = _mm512_mask_blend_epi64(0xAA, lo, hi);
+    }
+    
+    // Handle remainders
+    size_t output_pos = left_idx + right_idx - 8;
+    uint64_t pending[8];
+    _mm512_storeu_epi64(pending, right_reg);
+    
+    size_t left_remaining = size_left - left_idx;
+    size_t right_remaining = size_right - right_idx;
+    
+    if (left_remaining == 0 && right_remaining == 0) {
+        _mm512_store_epi64(out + output_pos, right_reg);
+    } else {
+        uint64_t remainder_merged[16];
+        if (left_remaining < right_remaining) {
+            merge_local_64(left + left_idx, pending, remainder_merged, left_remaining, 8);
+            merge_local_64(remainder_merged, right + right_idx, out + output_pos,
+                          left_remaining + 8, right_remaining);
+        } else {
+            merge_local_64(right + right_idx, pending, remainder_merged, right_remaining, 8);
+            merge_local_64(remainder_merged, left + left_idx, out + output_pos,
+                          right_remaining + 8, left_remaining);
+        }
+    }
+}
+
+// Find split point for parallel merge
+static void find_merge_split_64(uint64_t *left, size_t left_size,
+                                 uint64_t *right, size_t right_size,
+                                 size_t *out_i, size_t *out_j) {
+    size_t total = left_size + right_size;
+    size_t target = total / 2;
+    
+    size_t lo = (target > right_size) ? (target - right_size) : 0;
+    size_t hi = (target < left_size) ? target : left_size;
+    
+    while (lo < hi) {
+        size_t i = lo + (hi - lo) / 2;
+        size_t j = target - i;
+        
+        if (j > 0 && i < left_size && right[j - 1] > left[i]) {
+            lo = i + 1;
+        } else if (i > 0 && j < right_size && left[i - 1] > right[j]) {
+            hi = i;
+        } else {
+            *out_i = i;
+            *out_j = j;
+            return;
+        }
+    }
+    
+    *out_i = lo;
+    *out_j = target - lo;
+}
+
+// Parallel merge implementation using OpenMP tasks
+static void parallel_merge_impl_64(uint64_t *left, size_t left_size,
+                                    uint64_t *right, size_t right_size,
+                                    uint64_t *out, int depth) {
+    size_t total = left_size + right_size;
+    
+    // Base case
+    if (depth <= 0 || total < PARALLEL_MERGE_THRESHOLD_64) {
+        int left_aligned = ((uintptr_t)left % 64) == 0;
+        int right_aligned = ((uintptr_t)right % 64) == 0;
+        
+        if (left_aligned && right_aligned) {
+            merge_arrays_64(left, left_size, right, right_size, out);
+        } else {
+            merge_arrays_64_unaligned(left, left_size, right, right_size, out);
+        }
+        return;
+    }
+    
+    // Find split point
+    size_t i, j;
+    find_merge_split_64(left, left_size, right, right_size, &i, &j);
+    size_t out_split = i + j;
+    
+    // Spawn parallel tasks
+    #pragma omp task
+    parallel_merge_impl_64(left, i, right, j, out, depth - 1);
+    
+    #pragma omp task
+    parallel_merge_impl_64(left + i, left_size - i,
+                           right + j, right_size - j,
+                           out + out_split, depth - 1);
+    
+    #pragma omp taskwait
+}
+
+// Public interface for parallel merge
+static void parallel_merge_64(uint64_t *left, size_t left_size,
+                               uint64_t *right, size_t right_size,
+                               uint64_t *out) {
+    int depth = 0;
+    for (int t = NUM_THREADS; t > 1; t /= 2) depth++;
+    depth += 1;
+    
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            parallel_merge_impl_64(left, left_size, right, right_size, out, depth);
+        }
+    }
+}
+
 // ============== Main Sort Implementation ==============
 
 #define SORT_THRESHOLD 32  // Base case size (must be multiple of 16 for SIMD)
@@ -408,21 +633,35 @@ static void sort_chunk_parallel_64(uint64_t *arr, size_t chunk_size, uint64_t *t
     for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (size_t p = 0; p < num_pairs; p++) {
-            size_t left_start = p * 2 * width;
-            if (left_start >= chunk_size) continue;
+        if (num_pairs > 1) {
+            // MULTIPLE PAIRS: Use parallel for
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (size_t p = 0; p < num_pairs; p++) {
+                size_t left_start = p * 2 * width;
+                if (left_start >= chunk_size) continue;
+                
+                size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
+                size_t right_start = left_start + left_size;
+                
+                if (right_start >= chunk_size) {
+                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint64_t));
+                } else {
+                    size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
+                    merge_arrays_64(src + left_start, left_size,
+                                   src + right_start, right_size,
+                                   dst + left_start);
+                }
+            }
+        } else {
+            // SINGLE PAIR: Use parallel merge - all threads collaborate
+            size_t left_size = (width <= chunk_size) ? width : chunk_size;
+            size_t right_start = left_size;
             
-            size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
-            size_t right_start = left_start + left_size;
-            
-            if (right_start >= chunk_size) {
-                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint64_t));
+            if (right_start < chunk_size) {
+                size_t right_size = chunk_size - right_start;
+                parallel_merge_64(src, left_size, src + right_start, right_size, dst);
             } else {
-                size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-                merge_arrays_64(src + left_start, left_size,
-                               src + right_start, right_size,
-                               dst + left_start);
+                memcpy(dst, src, chunk_size * sizeof(uint64_t));
             }
         }
         
@@ -489,28 +728,49 @@ void stable_merge_sort(uint32_t *arr, size_t size) {
             t_start = get_time_sec();
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
             
-            #pragma omp parallel for schedule(dynamic, 1)
-            for (size_t p = 0; p < num_pairs; p++) {
-                size_t left_start = p * 2 * width;
-                if (left_start >= size) continue;
-                
-                size_t left_size = (left_start + width <= size) ? width : (size - left_start);
-                size_t right_start = left_start + left_size;
-                
-                if (right_start >= size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint64_t));
-                } else {
-                    size_t right_size = (right_start + width <= size) ? width : (size - right_start);
-                    merge_arrays_64(src + left_start, left_size,
-                                   src + right_start, right_size,
-                                   dst + left_start);
+            if (num_pairs > 1) {
+                // MULTIPLE PAIRS: Use parallel for
+                #pragma omp parallel for schedule(dynamic, 1)
+                for (size_t p = 0; p < num_pairs; p++) {
+                    size_t left_start = p * 2 * width;
+                    if (left_start >= size) continue;
+                    
+                    size_t left_size = (left_start + width <= size) ? width : (size - left_start);
+                    size_t right_start = left_start + left_size;
+                    
+                    if (right_start >= size) {
+                        memcpy(dst + left_start, src + left_start, left_size * sizeof(uint64_t));
+                    } else {
+                        size_t right_size = (right_start + width <= size) ? width : (size - right_start);
+                        merge_arrays_64(src + left_start, left_size,
+                                       src + right_start, right_size,
+                                       dst + left_start);
+                    }
                 }
+                t_end = get_time_sec();
+                double throughput = (size * sizeof(uint64_t)) / (t_end - t_start) / 1e9;
+                printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n",
+                       width, t_end - t_start, num_pairs, throughput);
+            } else {
+                // SINGLE PAIR: Use parallel merge - all threads collaborate
+                size_t left_size = (width <= size) ? width : size;
+                size_t right_start = left_size;
+                
+                if (right_start < size) {
+                    size_t right_size = size - right_start;
+                    parallel_merge_64(src, left_size, src + right_start, right_size, dst);
+                } else {
+                    #pragma omp parallel for schedule(static)
+                    for (size_t i = 0; i < size; i += 4096) {
+                        size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
+                        memcpy(dst + i, src + i, copy_size * sizeof(uint64_t));
+                    }
+                }
+                t_end = get_time_sec();
+                double throughput = (size * sizeof(uint64_t)) / (t_end - t_start) / 1e9;
+                printf("  [Phase 2] Merge width %10zu: %.3f sec (PARALLEL merge, %.2f GB/s)\n",
+                       width, t_end - t_start, throughput);
             }
-            
-            t_end = get_time_sec();
-            double throughput = (size * sizeof(uint64_t)) / (t_end - t_start) / 1e9;
-            printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n",
-                   width, t_end - t_start, num_pairs, throughput);
             
             uint64_t *swap = src;
             src = dst;
@@ -519,7 +779,14 @@ void stable_merge_sort(uint32_t *arr, size_t size) {
         
         // Ensure final result is in keys
         if (src != keys) {
-            memcpy(keys, src, size * sizeof(uint64_t));
+            t_start = get_time_sec();
+            #pragma omp parallel for schedule(static)
+            for (size_t i = 0; i < size; i += 4096) {
+                size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
+                memcpy(keys + i, src + i, copy_size * sizeof(uint64_t));
+            }
+            t_end = get_time_sec();
+            printf("  [Final  ] Copy back: %.3f sec\n", t_end - t_start);
         }
     }
     
