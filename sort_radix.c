@@ -12,6 +12,9 @@
 #define RADIX_SIZE (1 << RADIX_BITS)  // 256 buckets
 #define RADIX_MASK (RADIX_SIZE - 1)
 
+// Software Write-Combining buffer size (one cache line = 16 uint32_t)
+#define WC_BUFFER_SIZE 16
+
 // Helper for timing
 static inline double get_time_sec(void) {
     struct timespec ts;
@@ -69,13 +72,42 @@ void sort_array(uint32_t *arr, size_t size) {
         #pragma omp parallel
         {
             int tid = omp_get_thread_num();
+            int nthreads = omp_get_num_threads();
             
             // Clear local histogram
             memset(local_hist[tid], 0, RADIX_SIZE * sizeof(size_t));
             
-            // Count elements for this thread's chunk
-            #pragma omp for schedule(static)
-            for (size_t i = 0; i < size; i++) {
+            // Each thread processes its static chunk
+            size_t chunk_size = (size + nthreads - 1) / nthreads;
+            size_t start = tid * chunk_size;
+            size_t end = (start + chunk_size < size) ? start + chunk_size : size;
+            
+            // Count elements with prefetching and unrolling (4x)
+            size_t i = start;
+            for (; i + 4 <= end; i += 4) {
+                // Prefetch ahead
+                _mm_prefetch((const char*)(src + i + 64), _MM_HINT_T0);
+                
+                // Load 4 elements
+                uint32_t v0 = src[i];
+                uint32_t v1 = src[i + 1];
+                uint32_t v2 = src[i + 2];
+                uint32_t v3 = src[i + 3];
+                
+                // Extract digits
+                uint32_t d0 = (v0 >> shift) & RADIX_MASK;
+                uint32_t d1 = (v1 >> shift) & RADIX_MASK;
+                uint32_t d2 = (v2 >> shift) & RADIX_MASK;
+                uint32_t d3 = (v3 >> shift) & RADIX_MASK;
+                
+                // Update histogram
+                local_hist[tid][d0]++;
+                local_hist[tid][d1]++;
+                local_hist[tid][d2]++;
+                local_hist[tid][d3]++;
+            }
+            // Handle remainder
+            for (; i < end; i++) {
                 uint32_t digit = (src[i] >> shift) & RADIX_MASK;
                 local_hist[tid][digit]++;
             }
@@ -106,7 +138,8 @@ void sort_array(uint32_t *arr, size_t size) {
             }
         }
         
-        // ===== Phase 4: Scatter elements to output (stable) =====
+        // ===== Phase 4: Scatter elements to output with Write-Combining =====
+        // Software write-combining: buffer writes locally, flush as cache lines
         #pragma omp parallel
         {
             int tid = omp_get_thread_num();
@@ -121,11 +154,40 @@ void sort_array(uint32_t *arr, size_t size) {
             size_t my_offsets[RADIX_SIZE];
             memcpy(my_offsets, thread_offsets[tid], RADIX_SIZE * sizeof(size_t));
             
-            // Scatter this thread's elements
+            // Software write-combining buffers (one per bucket)
+            // Aligned to cache line for efficient flushing
+            uint32_t wc_buffers[RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
+            uint8_t wc_counts[RADIX_SIZE];
+            memset(wc_counts, 0, RADIX_SIZE);
+            
+            // Scatter this thread's elements with write-combining
             for (size_t i = start; i < end; i++) {
+                // Prefetch input ahead
+                if ((i & 15) == 0) {
+                    _mm_prefetch((const char*)(src + i + 64), _MM_HINT_T0);
+                }
+                
                 uint32_t val = src[i];
                 uint32_t digit = (val >> shift) & RADIX_MASK;
-                dst[my_offsets[digit]++] = val;
+                
+                // Add to write-combine buffer
+                wc_buffers[digit][wc_counts[digit]++] = val;
+                
+                // Flush buffer when full (16 elements = 1 cache line)
+                if (wc_counts[digit] == WC_BUFFER_SIZE) {
+                    // Use SIMD store for full cache line
+                    __m512i vec = _mm512_loadu_si512((__m512i*)wc_buffers[digit]);
+                    _mm512_storeu_si512((__m512i*)(dst + my_offsets[digit]), vec);
+                    my_offsets[digit] += WC_BUFFER_SIZE;
+                    wc_counts[digit] = 0;
+                }
+            }
+            
+            // Flush remaining elements in buffers
+            for (int d = 0; d < RADIX_SIZE; d++) {
+                if (wc_counts[d] > 0) {
+                    memcpy(dst + my_offsets[d], wc_buffers[d], wc_counts[d] * sizeof(uint32_t));
+                }
             }
         }
         
