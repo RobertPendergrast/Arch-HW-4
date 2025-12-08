@@ -399,24 +399,7 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// Order-independent hash using XOR and sum (parallel)
-// Returns two values: xor_hash and sum_hash
-static void compute_hash(uint32_t *arr, size_t size, uint64_t *xor_out, uint64_t *sum_out) {
-    uint64_t xor_hash = 0;
-    uint64_t sum_hash = 0;
-    
-    #pragma omp parallel reduction(^:xor_hash) reduction(+:sum_hash)
-    {
-        #pragma omp for schedule(static)
-        for (size_t i = 0; i < size; i++) {
-            xor_hash ^= arr[i];
-            sum_hash += arr[i];
-        }
-    }
-    
-    *xor_out = xor_hash;
-    *sum_out = sum_hash;
-}
+
 
 // Sort a single chunk with ALL threads collaborating (cache-friendly)
 // All threads work on the SAME chunk, keeping data hot in L3 cache
