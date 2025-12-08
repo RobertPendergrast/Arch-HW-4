@@ -65,4 +65,32 @@ void merge_arrays_unaligned(
     uint32_t *arr
 );
 
+// ============== KEY-VALUE VERSIONS (for stability testing) ==============
+// These sort payload arrays alongside keys without using payload for comparison.
+// Useful for tracking element movement to measure sorting stability.
+
+// STREAMING KV version: uses non-temporal stores, best for large out-of-cache merges
+void merge_arrays_kv(
+    uint32_t *left_key,
+    uint32_t *left_payload,
+    size_t size_left,
+    uint32_t *right_key,
+    uint32_t *right_payload,
+    size_t size_right,
+    uint32_t *arr_key,
+    uint32_t *arr_payload
+);
+
+// CACHED KV version: uses regular stores, best for L3-resident data that will be reused
+void merge_arrays_cached_kv(
+    uint32_t *left_key,
+    uint32_t *left_payload,
+    size_t size_left,
+    uint32_t *right_key,
+    uint32_t *right_payload,
+    size_t size_right,
+    uint32_t *arr_key,
+    uint32_t *arr_payload
+);
+
 #endif
