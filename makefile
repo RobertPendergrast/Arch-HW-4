@@ -59,11 +59,14 @@ sort_scaler_comparison: sort_scaler_comparison.c utils.o merge.o
 sort_radix: sort_radix.c utils.o
 	$(CC) $(CFLAGS) -fopenmp sort_radix.c utils.o -o sort_radix $(LDFLAGS)
 
+sort_radix_kv: sort_radix_kv.c utils.o
+	$(CC) $(CFLAGS) -fopenmp sort_radix_kv.c utils.o -o sort_radix_kv $(LDFLAGS)
+
 membw_test: membw_test.c
 	$(CC) $(CFLAGS) -fopenmp membw_test.c -o membw_test $(LDFLAGS)
 
 clean:
-	rm -f utils.o merge.o stable_sort_avx512.o sorting merge threaded_devide improved_split multi_sort test_stable_sort sort_simd sort_simd_kv sort_fast_stable test_merge test_sort_network bench_stable_sort sort_radix membw_test
+	rm -f utils.o merge.o stable_sort_avx512.o sorting merge threaded_devide improved_split multi_sort test_stable_sort sort_simd sort_simd_kv sort_fast_stable test_merge test_sort_network bench_stable_sort sort_radix sort_radix_kv membw_test
 
 github:
 	-git commit -a
