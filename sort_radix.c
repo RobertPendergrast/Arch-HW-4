@@ -21,12 +21,6 @@
 #define ALIGN_ELEMS 16
 #define ALIGN_MASK (ALIGN_ELEMS - 1)
 
-// Round up to next aligned offset
-#define ALIGN_UP(x) (((x) + ALIGN_MASK) & ~((size_t)ALIGN_MASK))
-
-// Max padding waste: 15 elements per bucket * 256 buckets = 3840 elements
-#define MAX_PADDING (ALIGN_MASK * RADIX_SIZE)
-
 // ============== Streaming Store Flush ==============
 // Two versions: fast aligned path (no checks) and general path (handles any alignment)
 
@@ -48,40 +42,6 @@ static inline void flush_buffer_aligned(uint32_t *buf, uint32_t *out, int count)
     }
 }
 
-// SLOW PATH: Handles arbitrary alignment
-// Only used for first flush of each bucket (to align subsequent flushes)
-static inline void flush_buffer_unaligned(uint32_t *buf, uint32_t *out, int count) {
-    int idx = 0;
-    
-    // Handle unaligned prefix until we hit 64-byte boundary
-    size_t misalign_bytes = ((size_t)out) & 63;
-    if (misalign_bytes != 0) {
-        int elems_to_align = (64 - misalign_bytes) / sizeof(uint32_t);
-        if (elems_to_align > count) elems_to_align = count;
-        
-        for (int j = 0; j < elems_to_align; j++) {
-            out[j] = buf[j];
-        }
-        idx = elems_to_align;
-    }
-    
-    // Stream the aligned middle portion
-    uint32_t *aligned_out = out + idx;
-    uint32_t *aligned_buf = buf + idx;
-    int remaining = count - idx;
-    int full_lines = remaining / 16;
-    
-    for (int line = 0; line < full_lines; line++) {
-        __m512i v = _mm512_loadu_si512((__m512i*)(aligned_buf + line * 16));
-        _mm512_stream_si512((__m512i*)(aligned_out + line * 16), v);
-    }
-    
-    // Handle tail
-    int tail_start = idx + full_lines * 16;
-    for (int j = tail_start; j < count; j++) {
-        out[j] = buf[j];
-    }
-}
 
 // Helper for timing
 static inline double get_time_sec(void) {
@@ -101,9 +61,8 @@ void sort_array(uint32_t *arr, size_t size) {
     
     double t_start, t_end;
     
-    // Allocate output buffer (extra space for alignment padding)
-    size_t padded_size = size + MAX_PADDING;
-    uint32_t *temp = (uint32_t*)aligned_alloc(64, padded_size * sizeof(uint32_t));
+    // Allocate output buffer
+    uint32_t *temp = (uint32_t*)aligned_alloc(64, size * sizeof(uint32_t));
     if (!temp) {
         fprintf(stderr, "Failed to allocate temp buffer\n");
         return;
@@ -219,14 +178,10 @@ void sort_array(uint32_t *arr, size_t size) {
             }
         }
         
-        // Compute prefix sum (exclusive) WITH ALIGNMENT
-        // Each bucket starts at a 64-byte aligned offset (multiple of 16 elements)
-        // This guarantees all streaming store flushes hit aligned addresses!
-        global_prefix[0] = 0;  // Base is already 64-byte aligned
+        // Compute prefix sum (exclusive)
+        global_prefix[0] = 0;
         for (int d = 1; d < RADIX_SIZE; d++) {
-            // Round up to next aligned offset
-            size_t natural_offset = global_prefix[d-1] + global_hist[d-1];
-            global_prefix[d] = ALIGN_UP(natural_offset);
+            global_prefix[d] = global_prefix[d-1] + global_hist[d-1];
         }
         
         // ===== Phase 3: Compute per-thread offsets for stable scatter =====
@@ -260,11 +215,34 @@ void sort_array(uint32_t *arr, size_t size) {
             // Software write-combining buffers (one per bucket)
             // Aligned to cache line for efficient flushing
             uint32_t wc_buffers[RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
-            uint16_t wc_counts[RADIX_SIZE];  // uint16_t for larger buffer sizes
+            uint16_t wc_counts[RADIX_SIZE];
             memset(wc_counts, 0, RADIX_SIZE * sizeof(uint16_t));
             
-            // NOTE: All offsets are now guaranteed 64-byte aligned due to ALIGN_UP in prefix sum!
-            // No alignment tracking needed - always use fast path
+            // EARLY FLUSH STRATEGY: For unaligned buckets, do a small early flush to align
+            // After early flush, offset becomes aligned and all subsequent flushes use fast path
+            //
+            // first_flush_threshold[d] = elements to accumulate before first flush
+            //   - If already aligned: WC_BUFFER_SIZE (normal full flush)
+            //   - If unaligned: (16 - offset%16) to reach alignment, then future flushes are aligned
+            // bucket_aligned[d] = 1 after we've done the aligning flush
+            
+            uint16_t first_flush_threshold[RADIX_SIZE];
+            uint8_t bucket_aligned[RADIX_SIZE];
+            
+            for (int d = 0; d < RADIX_SIZE; d++) {
+                size_t offset = my_offsets[d];
+                size_t misalign = offset & ALIGN_MASK;  // offset % 16
+                
+                if (misalign == 0) {
+                    // Already aligned - use full buffer size, mark as aligned
+                    first_flush_threshold[d] = WC_BUFFER_SIZE;
+                    bucket_aligned[d] = 1;
+                } else {
+                    // Unaligned - flush early to align (1-15 elements)
+                    first_flush_threshold[d] = ALIGN_ELEMS - misalign;
+                    bucket_aligned[d] = 0;
+                }
+            }
             
             // Scatter with SIMD loading + write-combining
             size_t i = start;
@@ -290,18 +268,35 @@ void sort_array(uint32_t *arr, size_t size) {
                 _mm512_storeu_si512((__m512i*)digit_arr, digits);
                 
                 // Scatter each element to its bucket (unrolled)
-                // FLUSH_BUFFER: always aligned thanks to ALIGN_UP in prefix sum
-                #define FLUSH_BUFFER(digit) do { \
+                // FLUSH_BUFFER: uses fast aligned path (bucket is always aligned after first flush)
+                #define FLUSH_BUFFER_FULL(digit) do { \
                     flush_buffer_aligned(wc_buffers[digit], dst + my_offsets[digit], WC_BUFFER_SIZE); \
                     my_offsets[digit] += WC_BUFFER_SIZE; \
                     wc_counts[digit] = 0; \
                 } while(0)
                 
+                // Early flush for alignment: small flush (1-15 elements) with scalar stores
+                #define FLUSH_BUFFER_EARLY(digit) do { \
+                    uint16_t cnt = wc_counts[digit]; \
+                    uint32_t *out = dst + my_offsets[digit]; \
+                    for (uint16_t _j = 0; _j < cnt; _j++) { \
+                        out[_j] = wc_buffers[digit][_j]; \
+                    } \
+                    my_offsets[digit] += cnt; \
+                    wc_counts[digit] = 0; \
+                    bucket_aligned[digit] = 1; /* Now aligned for fast path! */ \
+                    first_flush_threshold[digit] = WC_BUFFER_SIZE; \
+                } while(0)
+                
                 #define SCATTER_ONE(idx) do { \
                     uint32_t d = digit_arr[idx]; \
                     wc_buffers[d][wc_counts[d]++] = val_arr[idx]; \
-                    if (wc_counts[d] == WC_BUFFER_SIZE) { \
-                        FLUSH_BUFFER(d); \
+                    if (wc_counts[d] == first_flush_threshold[d]) { \
+                        if (bucket_aligned[d]) { \
+                            FLUSH_BUFFER_FULL(d); \
+                        } else { \
+                            FLUSH_BUFFER_EARLY(d); \
+                        } \
                     } \
                 } while(0)
                 
@@ -320,17 +315,33 @@ void sort_array(uint32_t *arr, size_t size) {
                 
                 wc_buffers[digit][wc_counts[digit]++] = val;
                 
-                if (wc_counts[digit] == WC_BUFFER_SIZE) {
-                    FLUSH_BUFFER(digit);
+                // Check if we hit the flush threshold (early or full)
+                if (wc_counts[digit] == first_flush_threshold[digit]) {
+                    if (bucket_aligned[digit]) {
+                        FLUSH_BUFFER_FULL(digit);
+                    } else {
+                        FLUSH_BUFFER_EARLY(digit);
+                    }
                 }
             }
             
-            #undef FLUSH_BUFFER
+            #undef FLUSH_BUFFER_FULL
+            #undef FLUSH_BUFFER_EARLY
             
-            // Flush remaining elements in buffers (all aligned)
+            // Flush remaining elements in buffers
+            // By now all buckets with >= early_threshold elements are aligned
             for (int d = 0; d < RADIX_SIZE; d++) {
                 if (wc_counts[d] > 0) {
-                    flush_buffer_aligned(wc_buffers[d], dst + my_offsets[d], wc_counts[d]);
+                    // If bucket is aligned, use fast path; else scalar (small remainder anyway)
+                    if (bucket_aligned[d]) {
+                        flush_buffer_aligned(wc_buffers[d], dst + my_offsets[d], wc_counts[d]);
+                    } else {
+                        // Never got enough elements to do early flush - just scalar copy
+                        uint32_t *out = dst + my_offsets[d];
+                        for (int j = 0; j < wc_counts[d]; j++) {
+                            out[j] = wc_buffers[d][j];
+                        }
+                    }
                 }
             }
             
