@@ -6,10 +6,10 @@
 # with 1 billion elements, cleaning up data files after each test.
 #
 # Algorithms:
-#   1. sorting        - Base merge sort
-#   2. improved_split - Cache-optimized merge sort
-#   3. multi_sort     - Multithreaded merge sort
-#   4. sort_simd      - SIMD-accelerated merge sort
+#   1. sorting        - Base merge sort (single-threaded, no optimizations)
+#   2. sort_no_simd 1 - Cache-optimized merge sort (single-threaded with L3 blocking)
+#   3. sort_no_simd 16- Multithreaded merge sort (16 threads, L3 blocking, parallel merge)
+#   4. sort_simd      - SIMD-accelerated merge sort (16 threads, AVX-512, streaming stores)
 #
 # Distributions:
 #   uniform, normal, pareto, sorted, reverse, nearly
@@ -18,10 +18,12 @@
 set -e  # Exit on error
 
 # Configuration
-# SIZE=1000000000  # 1 billion elements (~4GB data file)
 SIZE=1000000000  # 1 billion elements (~4GB data file)
 DISTRIBUTIONS=("uniform" "normal" "pareto" "sorted" "reverse" "nearly")
-ALGORITHMS=("sorting" "improved_split" "multi_sort" "sort_simd")
+
+# Algorithm commands (some with thread count argument)
+ALGORITHM_CMDS=("./sorting" "./sort_no_simd" "./sort_no_simd" "./sort_simd")
+ALGORITHM_ARGS=("" "1" "16" "")  # Thread count for sort_no_simd variants
 ALGORITHM_NAMES=("Base" "Cache-Optimized" "Multithreaded" "SIMD")
 RESULTS_FILE="benchmark_results.csv"
 OUTPUT_DIR="datasets"
@@ -43,13 +45,17 @@ echo -e "${BLUE}============================================${NC}"
 echo ""
 echo "Configuration:"
 echo "  Array size: $(printf "%'d" $SIZE) elements (~$((SIZE * 4 / 1024 / 1024 / 1024)) GB)"
-echo "  Algorithms: ${ALGORITHMS[*]}"
+echo "  Algorithms:"
+echo "    - Base:           sorting (single-threaded)"
+echo "    - Cache-Optimized: sort_no_simd with 1 thread"
+echo "    - Multithreaded:  sort_no_simd with 16 threads"
+echo "    - SIMD:           sort_simd (16 threads + AVX-512)"
 echo "  Distributions: ${DISTRIBUTIONS[*]}"
 echo ""
 
-# Build all executables
+# Build required executables
 echo -e "${YELLOW}Building executables...${NC}"
-make all
+make sorting sort_no_simd sort_simd
 echo ""
 
 # Initialize results CSV
@@ -58,16 +64,23 @@ echo "distribution,algorithm,algorithm_name,time_seconds,status" > "$RESULTS_FIL
 # Function to run a single benchmark
 run_benchmark() {
     local dist=$1
-    local algo=$2
-    local algo_name=$3
+    local algo_cmd=$2
+    local algo_args=$3
+    local algo_name=$4
     local data_file="$OUTPUT_DIR/${dist}_${SIZE}.bin"
     
     echo -e "  Running ${BLUE}${algo_name}${NC}..."
     
+    # Build the full command (with optional thread argument)
+    local full_cmd="$algo_cmd $data_file $TEMP_OUTPUT"
+    if [ -n "$algo_args" ]; then
+        full_cmd="$algo_cmd $data_file $TEMP_OUTPUT $algo_args"
+    fi
+    
     # Run the algorithm and capture output (no timeout - let it run to completion)
     local start_time=$(date +%s.%N)
     
-    if ./"$algo" "$data_file" "$TEMP_OUTPUT" > /tmp/sort_stdout.txt 2>&1; then
+    if $full_cmd > /tmp/sort_stdout.txt 2>&1; then
         local end_time=$(date +%s.%N)
         
         # Extract time from program output (looks for "Sorting took X.XXX seconds")
@@ -81,10 +94,10 @@ run_benchmark() {
         # Check if sorting was successful
         if grep -q "sorted successfully" /tmp/sort_stdout.txt; then
             echo -e "    ${GREEN}✓${NC} ${sort_time}s"
-            echo "${dist},${algo},${algo_name},${sort_time},OK" >> "$RESULTS_FILE"
+            echo "${dist},${algo_name},${algo_name},${sort_time},OK" >> "$RESULTS_FILE"
         else
             echo -e "    ${RED}✗${NC} Sorting failed (verification error)"
-            echo "${dist},${algo},${algo_name},,VERIFY_FAIL" >> "$RESULTS_FILE"
+            echo "${dist},${algo_name},${algo_name},,VERIFY_FAIL" >> "$RESULTS_FILE"
         fi
     else
         echo -e "    ${RED}✗${NC} Error (exit code: $?)"
@@ -92,7 +105,7 @@ run_benchmark() {
         if [ -s /tmp/sort_stdout.txt ]; then
             echo "    Output: $(head -3 /tmp/sort_stdout.txt)"
         fi
-        echo "${dist},${algo},${algo_name},,ERROR" >> "$RESULTS_FILE"
+        echo "${dist},${algo_name},${algo_name},,ERROR" >> "$RESULTS_FILE"
     fi
     
     # Clean up temp output (skip if /dev/null)
@@ -102,7 +115,7 @@ run_benchmark() {
 }
 
 # Main benchmark loop
-total_tests=$((${#DISTRIBUTIONS[@]} * ${#ALGORITHMS[@]}))
+total_tests=$((${#DISTRIBUTIONS[@]} * ${#ALGORITHM_NAMES[@]}))
 current_test=0
 
 for dist in "${DISTRIBUTIONS[@]}"; do
@@ -132,13 +145,14 @@ for dist in "${DISTRIBUTIONS[@]}"; do
     fi
     
     # Run each algorithm on this distribution
-    for i in "${!ALGORITHMS[@]}"; do
-        algo="${ALGORITHMS[$i]}"
+    for i in "${!ALGORITHM_NAMES[@]}"; do
+        algo_cmd="${ALGORITHM_CMDS[$i]}"
+        algo_args="${ALGORITHM_ARGS[$i]}"
         algo_name="${ALGORITHM_NAMES[$i]}"
         current_test=$((current_test + 1))
         
-        echo -e "[$current_test/$total_tests] ${algo_name} (${algo})"
-        run_benchmark "$dist" "$algo" "$algo_name"
+        echo -e "[$current_test/$total_tests] ${algo_name}"
+        run_benchmark "$dist" "$algo_cmd" "$algo_args" "$algo_name"
     done
     
     # Delete the data file to save space
