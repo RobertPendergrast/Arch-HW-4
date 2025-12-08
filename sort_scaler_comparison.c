@@ -13,7 +13,7 @@
 #define NUM_THREADS 16
 
 // Base case: use insertion sort for chunks this size or smaller
-#define BASE_CASE_SIZE 64
+#define BASE_CASE_SIZE 32
 
 // Threshold: when number of merges drops below this, switch to parallel merge
 #define PARALLEL_MERGE_THRESHOLD NUM_THREADS
