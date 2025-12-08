@@ -5,6 +5,7 @@
 #include <time.h>
 #include <omp.h>
 #include <immintrin.h>
+#include <sys/mman.h>  // For madvise() and huge pages
 #include "utils.h"
 
 #define NUM_THREADS 16
@@ -59,13 +60,30 @@ void sort_array(uint32_t *arr, size_t size) {
     
     omp_set_num_threads(NUM_THREADS);
     
+    // Request huge pages for input array (may already be allocated, but worth trying)
+    size_t arr_size = size * sizeof(uint32_t);
+    madvise(arr, arr_size, MADV_HUGEPAGE);
+    
     double t_start, t_end;
     
-    // Allocate output buffer
-    uint32_t *temp = (uint32_t*)aligned_alloc(64, size * sizeof(uint32_t));
+    // Allocate output buffer with huge page support
+    // Align to 2MB boundary for huge pages
+    size_t alloc_size = size * sizeof(uint32_t);
+    uint32_t *temp = (uint32_t*)aligned_alloc(2 * 1024 * 1024, alloc_size);  // 2MB alignment
+    if (!temp) {
+        // Fall back to 64-byte alignment if 2MB fails
+        temp = (uint32_t*)aligned_alloc(64, alloc_size);
+    }
     if (!temp) {
         fprintf(stderr, "Failed to allocate temp buffer\n");
         return;
+    }
+    
+    // Request transparent huge pages for the temp buffer
+    // This can dramatically reduce TLB misses (2MB pages vs 4KB pages)
+    if (madvise(temp, alloc_size, MADV_HUGEPAGE) != 0) {
+        // Not fatal - will use regular pages
+        // perror("madvise MADV_HUGEPAGE (temp)");
     }
     
     // Pre-touch temp buffer
