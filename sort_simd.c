@@ -455,16 +455,14 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 }
             }
         } else {
-            // SINGLE PAIR: Use parallel merge - only case where it helps
-            // Still use cached version since we're within L3 chunk
+            // SINGLE PAIR: Use parallel merge - all threads collaborate on one large merge
+            // Streaming stores are OK here since this is the final pass before Phase 2
             size_t left_size = (width <= chunk_size) ? width : chunk_size;
             size_t right_start = left_size;
             
             if (right_start < chunk_size) {
                 size_t right_size = chunk_size - right_start;
-                // For single large merge within L3, just use cached sequential merge
-                // (parallel_merge would use streaming stores which evict from cache)
-                merge_arrays_cached(src, left_size, src + right_start, right_size, dst);
+                parallel_merge(src, left_size, src + right_start, right_size, dst);
             } else {
                 memcpy(dst, src, chunk_size * sizeof(uint32_t));
             }
