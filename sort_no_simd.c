@@ -22,8 +22,8 @@
 #include <omp.h>
 #include "utils.h"
 
-// Number of threads for OpenMP parallelization (same as sort_simd.c)
-#define NUM_THREADS 16
+// Number of threads for OpenMP parallelization (can be overridden via command line)
+static int g_num_threads = 16;
 
 // L3 cache size: 32 MiB = 8M uint32_t elements (same as sort_simd.c)
 #define L3_CHUNK_ELEMENTS (4 * 1024 * 1024)
@@ -170,7 +170,7 @@ static void parallel_merge(
     uint32_t *out
 ) {
     int depth = 0;
-    for (int t = NUM_THREADS; t > 1; t /= 2) depth++;
+    for (int t = g_num_threads; t > 1; t /= 2) depth++;
     depth += 1;
     
     #pragma omp parallel
@@ -203,7 +203,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     
     double t_start, t_end;
     
-    omp_set_num_threads(NUM_THREADS);
+    omp_set_num_threads(g_num_threads);
     
     // Allocate temp buffer
     uint32_t *temp = NULL;
@@ -236,7 +236,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     }
     t_end = get_time_sec();
     printf("  [Phase 1] Sort %zu L3 chunks (4M elements each): %.3f sec (%d threads)\n", 
-           num_chunks, t_end - t_start, NUM_THREADS);
+           num_chunks, t_end - t_start, g_num_threads);
     
     // ========== Phase 2: Merge L3-sized chunks together ==========
     if (size > L3_CHUNK_ELEMENTS) {
@@ -244,13 +244,13 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         uint32_t *dst = temp;
         size_t width = L3_CHUNK_ELEMENTS;
         
-        // Do parallel merges while num_pairs >= NUM_THREADS
+        // Do parallel merges while num_pairs >= g_num_threads
         while (width < size) {
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
             
-            if (num_pairs < (size_t)NUM_THREADS) {
+            if (num_pairs < (size_t)g_num_threads) {
                 printf("  [Phase 2] Stopping parallel-for merge at width %zu (%zu pairs < %d threads)\n", 
-                       width, num_pairs, NUM_THREADS);
+                       width, num_pairs, g_num_threads);
                 break;
             }
             
@@ -313,7 +313,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             t_end = get_time_sec();
             double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
             printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %d threads, %.2f GB/s)\n", 
-                   width, t_end - t_start, num_pairs, NUM_THREADS, throughput);
+                   width, t_end - t_start, num_pairs, g_num_threads, throughput);
             
             uint32_t *swap = src;
             src = dst;
@@ -341,9 +341,18 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Usage: %s <input_file> <output_file>\n", argv[0]);
+        printf("Usage: %s <input_file> <output_file> [num_threads]\n", argv[0]);
+        printf("  num_threads: 1-16 (default: 16)\n");
         return 1;
     }
+    
+    // Parse optional thread count
+    if (argc >= 4) {
+        g_num_threads = atoi(argv[3]);
+        if (g_num_threads < 1) g_num_threads = 1;
+        if (g_num_threads > 16) g_num_threads = 16;
+    }
+    printf("Using %d threads\n", g_num_threads);
 
     uint64_t size;
     uint32_t *arr = read_array_from_file(argv[1], &size);

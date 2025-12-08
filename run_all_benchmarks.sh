@@ -18,7 +18,7 @@
 set -e  # Exit on error
 
 # Configuration
-SIZE=1000000000  # 1 billion elements (~4GB data file)
+SIZE=2500000000  # 1 billion elements (~4GB data file)
 DISTRIBUTIONS=("uniform" "normal" "pareto" "sorted" "reverse" "nearly")
 
 # Algorithm commands (some with thread count argument)
@@ -26,7 +26,7 @@ ALGORITHM_CMDS=("./sorting" "./sort_no_simd" "./sort_no_simd" "./sort_simd")
 ALGORITHM_ARGS=("" "1" "16" "")  # Thread count for sort_no_simd variants
 ALGORITHM_NAMES=("Base" "Cache-Optimized" "Multithreaded" "SIMD")
 RESULTS_FILE="benchmark_results.csv"
-OUTPUT_DIR="datasets"
+OUTPUT_DIR="/mnt/data"
 TEMP_OUTPUT="/dev/null"  # Don't write output - saves ~4GB I/O per test
 
 # Create output directory

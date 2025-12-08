@@ -143,7 +143,7 @@ if __name__ == '__main__':
     
     np.random.seed(42)
     
-    output_path = f"datasets/{dist}_{size}.bin"
+    output_path = f"/mnt/data/{dist}_{size}.bin"
     
     print(f"Generating {dist} ({size:,} elements) in {CHUNK_SIZE:,}-element chunks...")
     
