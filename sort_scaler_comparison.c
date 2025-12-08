@@ -179,6 +179,18 @@ void sort_array(uint32_t *arr, size_t size) {
         return;
     }
     
+    // Pre-touch temp buffer to force OS to allocate physical pages
+    // This avoids page fault overhead during the first merge stage
+    clock_gettime(CLOCK_MONOTONIC, &stage_start);
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < size; i += 4096 / sizeof(uint32_t)) {
+        temp[i] = 0;  // Touch one element per page (4KB pages)
+    }
+    clock_gettime(CLOCK_MONOTONIC, &stage_end);
+    stage_time = (stage_end.tv_sec - stage_start.tv_sec) + 
+                (stage_end.tv_nsec - stage_start.tv_nsec) / 1e9;
+    printf("         temp buffer warmup (page faults), time=%.6f sec\n", stage_time);
+    
     // Pointers for ping-pong buffering
     uint32_t *src = arr;
     uint32_t *dst = temp;
