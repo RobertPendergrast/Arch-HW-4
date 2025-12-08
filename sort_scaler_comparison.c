@@ -33,11 +33,28 @@ static inline void insertion_sort(uint32_t *arr, size_t size) {
 }
 
 // ============== Stable scalar merge (uses <= for stability) ==============
+// Prefetch distance: 16 cache lines ahead (1024 bytes = 256 elements)
+#define PREFETCH_DISTANCE 256
+
 static void stable_merge(uint32_t *left, size_t size_left,
                          uint32_t *right, size_t size_right,
                          uint32_t *out) {
     size_t i = 0, j = 0, k = 0;
+    
+    // Initial prefetch burst - prime the cache
+    _mm_prefetch((const char*)(left), _MM_HINT_T0);
+    _mm_prefetch((const char*)(left + 64), _MM_HINT_T0);
+    _mm_prefetch((const char*)(right), _MM_HINT_T0);
+    _mm_prefetch((const char*)(right + 64), _MM_HINT_T0);
+    
+    // Main loop with prefetching
     while (i < size_left && j < size_right) {
+        // Prefetch ahead in both input arrays every 16 elements (1 cache line)
+        if ((k & 15) == 0) {
+            _mm_prefetch((const char*)(left + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            _mm_prefetch((const char*)(right + j + PREFETCH_DISTANCE), _MM_HINT_T0);
+        }
+        
         // Use <= for stability: when equal, take from left (preserves original order)
         if (left[i] <= right[j]) {
             out[k++] = left[i++];
