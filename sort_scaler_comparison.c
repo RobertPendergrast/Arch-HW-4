@@ -18,28 +18,17 @@
 // Threshold: when number of merges drops below this, switch to parallel merge
 #define PARALLEL_MERGE_THRESHOLD NUM_THREADS
 
-// ============== SIMD-optimized insertion sort for base case (stable) ==============
-// Uses binary search + memmove (which is SIMD-optimized) for the shift operation
+// ============== Insertion sort for base case (stable) ==============
 static inline void insertion_sort(uint32_t *arr, size_t size) {
     for (size_t i = 1; i < size; i++) {
         uint32_t key = arr[i];
-        if (arr[i - 1] <= key) continue;  // Already in place (common case)
-        
-        // Binary search for insertion point (more efficient for larger gaps)
-        size_t lo = 0, hi = i;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            if (arr[mid] <= key) {  // <= for stability
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
+        size_t j = i;
+        // Use > (not >=) for stability - equal elements stay in original order
+        while (j > 0 && arr[j - 1] > key) {
+            arr[j] = arr[j - 1];
+            j--;
         }
-        
-        // Shift elements [lo, i) right by 1 using memmove
-        // memmove is heavily optimized and uses SIMD internally
-        memmove(arr + lo + 1, arr + lo, (i - lo) * sizeof(uint32_t));
-        arr[lo] = key;
+        arr[j] = key;
     }
 }
 
