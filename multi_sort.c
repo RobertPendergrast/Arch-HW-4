@@ -6,9 +6,9 @@
 #include <time.h>
 #include "utils.h"
 
-// L3 cache is 66MB (i think), so 8 threads with 8MB each maximizes cache locality
-#define NUM_THREADS 8
-#define CACHE_SIZE_MB 64
+// L3 cache is 33MB (i think), so 16 threads with 2MB (basically) each maximizes cache locality
+#define NUM_THREADS 16
+#define CACHE_SIZE_MB 33
 #define CHUNK_SIZE (CACHE_SIZE_MB / NUM_THREADS * 1024 * 1024 / sizeof(uint32_t))
 
 // Helper to compute elapsed time in seconds
