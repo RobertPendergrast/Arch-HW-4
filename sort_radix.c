@@ -8,14 +8,14 @@
 #include "utils.h"
 
 #define NUM_THREADS 16
-#define RADIX_BITS 8
+#define RADIX_BITS 11
 #define RADIX_SIZE (1 << RADIX_BITS)  // 256 buckets
 #define RADIX_MASK (RADIX_SIZE - 1)
 
 // Software Write-Combining buffer size
 // Larger buffers = fewer flushes, better write coalescing
 // 256 elements = 1024 bytes = 16 cache lines (tuned for large L2)
-#define WC_BUFFER_SIZE 256
+#define WC_BUFFER_SIZE 128
 
 // Alignment requirement: 16 elements = 64 bytes = 1 cache line
 #define ALIGN_ELEMS 16
