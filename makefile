@@ -14,6 +14,9 @@ sorting: sorting.c utils.o
 sort_simd: sort_simd.c utils.o merge.o
 	$(CC) $(CFLAGS) -fopenmp sort_simd.c utils.o merge.o -o sort_simd $(LDFLAGS)
 
+sort_fast_stable: sort_fast_stable.c utils.o
+	$(CC) $(CFLAGS) -fopenmp sort_fast_stable.c utils.o -o sort_fast_stable $(LDFLAGS)
+
 merge: merge.c
 	$(CC) $(CFLAGS) merge.c -o merge $(LDFLAGS)
 
