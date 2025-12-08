@@ -268,25 +268,55 @@ void sort_array(uint32_t *arr, size_t size) {
         size_t num_merges = (size + 2 * run_size - 1) / (2 * run_size);
         
         if (num_merges >= PARALLEL_MERGE_THRESHOLD) {
-            // Many merges: run merges in parallel (one merge per thread task)
+            // Many merges: use interleaved merge (2 merges per thread iteration)
+            // This hides latency by giving CPU independent work streams
+            size_t pair_stride = 4 * run_size;  // Each iteration handles 2 merge pairs
+            
             #pragma omp parallel for schedule(dynamic)
-            for (size_t i = 0; i < size; i += 2 * run_size) {
-                size_t left_start = i;
-                size_t left_end = (i + run_size < size) ? i + run_size : size;
-                size_t right_start = left_end;
-                size_t right_end = (i + 2 * run_size < size) ? i + 2 * run_size : size;
+            for (size_t i = 0; i < size; i += pair_stride) {
+                // Merge pair 0
+                size_t left_start0 = i;
+                size_t left_end0 = (i + run_size < size) ? i + run_size : size;
+                size_t right_start0 = left_end0;
+                size_t right_end0 = (i + 2 * run_size < size) ? i + 2 * run_size : size;
+                size_t left_size0 = left_end0 - left_start0;
+                size_t right_size0 = right_end0 - right_start0;
                 
-                size_t left_size = left_end - left_start;
-                size_t right_size = right_end - right_start;
+                // Merge pair 1 (next pair, if exists)
+                size_t base1 = i + 2 * run_size;
+                size_t left_start1 = base1;
+                size_t left_end1 = (base1 + run_size < size) ? base1 + run_size : size;
+                size_t right_start1 = left_end1;
+                size_t right_end1 = (base1 + 2 * run_size < size) ? base1 + 2 * run_size : size;
+                size_t left_size1 = (base1 < size) ? left_end1 - left_start1 : 0;
+                size_t right_size1 = (right_start1 < size) ? right_end1 - right_start1 : 0;
                 
-                if (right_size == 0) {
-                    // Only left part exists, just copy
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                // Check if we have two valid merge pairs
+                if (left_size1 > 0 && right_size0 > 0 && right_size1 > 0) {
+                    // Both pairs are complete merges - use interleaved
+                    stable_merge_interleaved_2(
+                        src + left_start0, left_size0, src + right_start0, right_size0, dst + left_start0,
+                        src + left_start1, left_size1, src + right_start1, right_size1, dst + left_start1
+                    );
                 } else {
-                    // Merge left and right parts
-                    stable_merge(src + left_start, left_size,
-                               src + right_start, right_size,
-                               dst + left_start);
+                    // Handle pair 0
+                    if (right_size0 == 0) {
+                        memcpy(dst + left_start0, src + left_start0, left_size0 * sizeof(uint32_t));
+                    } else {
+                        stable_merge(src + left_start0, left_size0,
+                                   src + right_start0, right_size0,
+                                   dst + left_start0);
+                    }
+                    // Handle pair 1 if it exists
+                    if (left_size1 > 0) {
+                        if (right_size1 == 0) {
+                            memcpy(dst + left_start1, src + left_start1, left_size1 * sizeof(uint32_t));
+                        } else {
+                            stable_merge(src + left_start1, left_size1,
+                                       src + right_start1, right_size1,
+                                       dst + left_start1);
+                        }
+                    }
                 }
             }
         } else {
