@@ -13,28 +13,48 @@
 #define NUM_THREADS 16
 
 // Forward declaration
-void basic_merge_sort(uint32_t *arr, size_t size);
+void basic_merge_sort_kv(uint32_t *arr, uint32_t *payload, size_t size);
 
 // Avoid making changes to this function skeleton, apart from data type changes if required
 // In this starter code we have used uint32_t, feel free to change it to any other data type if required
-void sort_array(uint32_t *arr, size_t size) {
-    basic_merge_sort(arr, size);
+void sort_array_kv(uint32_t *arr, uint32_t *payload, size_t size) {
+    basic_merge_sort_kv(arr, payload, size);
 }
 
-// Insertion sort for small/remainder arrays
-static inline void insertion_sort(uint32_t *arr, size_t size) {
+// ============================================================================
+// KEY-VALUE SORTING IMPLEMENTATION
+// ============================================================================
+// This version tracks a payload array alongside keys for stability testing.
+//
+// DESIGN DIFFERENCES FROM NON-KV VERSION:
+// 1. TIE-BREAKING: Original uses min/max intrinsics which select the second
+//    operand when equal. KV version uses cmpgt+blend which selects the first
+//    operand when equal. This means equal keys may end up in different positions.
+//
+// 2. MEMORY: Uses 2x the memory (separate key and payload arrays).
+//
+// 3. BANDWIDTH: 2x memory bandwidth usage since we load/store both arrays.
+//
+// 4. INSTRUCTION COUNT: More instructions per comparison (cmpgt+2*blend vs min+max).
+// ============================================================================
+
+// Insertion sort for small/remainder arrays - KV version
+static inline void insertion_sort_kv(uint32_t *keys, uint32_t *payload, size_t size) {
     for (size_t i = 1; i < size; i++) {
-        uint32_t key = arr[i];
+        uint32_t key = keys[i];
+        uint32_t pay = payload[i];
         size_t j = i;
-        while (j > 0 && arr[j - 1] > key) {
-            arr[j] = arr[j - 1];
+        while (j > 0 && keys[j - 1] > key) {
+            keys[j] = keys[j - 1];
+            payload[j] = payload[j - 1];
             j--;
         }
-        arr[j] = key;
+        keys[j] = key;
+        payload[j] = pay;
     }
 }
 
-// ============== SIMD Sorting Network ==============
+// ============== SIMD Sorting Network (KV Version) ==============
 // Bitonic sort for 16 elements in a single 512-bit register
 
 // Shuffle indices for bitonic sort - swap elements at distance d
@@ -48,237 +68,253 @@ static const int SORT_SWAP8_IDX[16] __attribute__((aligned(64))) =
     {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};  // distance 8: swap i <-> i^8
 
 /*
- * Inline sort_16 that accepts pre-loaded shuffle indices.
- * OPTIMIZATION: Avoids 4 memory loads per call when indices are hoisted.
+ * KV version of sort_16_inline.
+ * 
+ * DIFFERENCE FROM ORIGINAL: Uses explicit cmpgt + blend instead of min/max.
+ * When keys are equal, this version keeps the element from the FIRST operand,
+ * while the original min/max keeps the element from the SECOND operand.
  */
-static inline __m512i sort_16_inline(
-    __m512i v,
+static inline void sort_16_inline_kv(
+    __m512i *key,
+    __m512i *pay,
     const __m512i swap1,
     const __m512i swap2,
     const __m512i swap4,
     const __m512i swap8
 ) {
-    __m512i t, lo, hi;
+    __m512i key_t, pay_t, lo_key, hi_key, lo_pay, hi_pay;
+    __mmask16 cmp;
+    
+    // Helper macro for compare-swap with payload tracking
+    // mask specifies which positions should take from hi (1) vs lo (0)
+    #define COMPARE_SWAP_KV(swap_idx, blend_mask) \
+        key_t = _mm512_permutexvar_epi32(swap_idx, *key); \
+        pay_t = _mm512_permutexvar_epi32(swap_idx, *pay); \
+        cmp = _mm512_cmpgt_epu32_mask(*key, key_t); \
+        lo_key = _mm512_mask_blend_epi32(cmp, *key, key_t); \
+        hi_key = _mm512_mask_blend_epi32(cmp, key_t, *key); \
+        lo_pay = _mm512_mask_blend_epi32(cmp, *pay, pay_t); \
+        hi_pay = _mm512_mask_blend_epi32(cmp, pay_t, *pay); \
+        *key = _mm512_mask_blend_epi32(blend_mask, lo_key, hi_key); \
+        *pay = _mm512_mask_blend_epi32(blend_mask, lo_pay, hi_pay);
     
     // ========== Stage 1: Sort pairs (distance 1) ==========
-    t = _mm512_permutexvar_epi32(swap1, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0x6666, lo, hi);
+    COMPARE_SWAP_KV(swap1, 0x6666)
     
     // ========== Stage 2: Merge into sorted 4s ==========
-    t = _mm512_permutexvar_epi32(swap2, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0xC3C3, lo, hi);
-    
-    t = _mm512_permutexvar_epi32(swap1, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0xA5A5, lo, hi);
+    COMPARE_SWAP_KV(swap2, 0xC3C3)
+    COMPARE_SWAP_KV(swap1, 0xA5A5)
     
     // ========== Stage 3: Merge into sorted 8s ==========
-    t = _mm512_permutexvar_epi32(swap4, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0x0FF0, lo, hi);
-    
-    t = _mm512_permutexvar_epi32(swap2, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0x33CC, lo, hi);
-    
-    t = _mm512_permutexvar_epi32(swap1, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0x55AA, lo, hi);
+    COMPARE_SWAP_KV(swap4, 0x0FF0)
+    COMPARE_SWAP_KV(swap2, 0x33CC)
+    COMPARE_SWAP_KV(swap1, 0x55AA)
     
     // ========== Stage 4: Final merge into sorted 16 (all ascending) ==========
-    t = _mm512_permutexvar_epi32(swap8, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0xFF00, lo, hi);
+    COMPARE_SWAP_KV(swap8, 0xFF00)
+    COMPARE_SWAP_KV(swap4, 0xF0F0)
+    COMPARE_SWAP_KV(swap2, 0xCCCC)
+    COMPARE_SWAP_KV(swap1, 0xAAAA)
     
-    t = _mm512_permutexvar_epi32(swap4, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
-    
-    t = _mm512_permutexvar_epi32(swap2, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
-    
-    t = _mm512_permutexvar_epi32(swap1, v);
-    lo = _mm512_min_epu32(v, t);
-    hi = _mm512_max_epu32(v, t);
-    v = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
-    
-    return v;
+    #undef COMPARE_SWAP_KV
 }
 
 /*
- * Inline merge_32 that accepts pre-loaded shuffle indices.
- * Merges two sorted 16-element registers into one sorted 32-element sequence.
+ * KV version of merge_32_inline.
+ * Merges two sorted 16-element register pairs into one sorted 32-element sequence.
+ * 
+ * DIFFERENCE FROM ORIGINAL: Same tie-breaking difference as sort_16_inline_kv.
  */
-static inline void merge_32_inline(
-    __m512i *a, __m512i *b,
+static inline void merge_32_inline_kv(
+    __m512i *a_key, __m512i *b_key,
+    __m512i *a_pay, __m512i *b_pay,
     const __m512i idx_rev,
     const __m512i idx_swap8,
     const __m512i idx_swap4
 ) {
+    __m512i lo_key, hi_key, lo_pay, hi_pay;
+    __mmask16 cmp;
+    
     // Reverse b to form bitonic sequence
-    *b = _mm512_permutexvar_epi32(idx_rev, *b);
+    *b_key = _mm512_permutexvar_epi32(idx_rev, *b_key);
+    *b_pay = _mm512_permutexvar_epi32(idx_rev, *b_pay);
 
     // Compare-swap across registers
-    __m512i lo = _mm512_min_epu32(*a, *b);
-    __m512i hi = _mm512_max_epu32(*a, *b);
-    *a = lo;
-    *b = hi;
+    cmp = _mm512_cmpgt_epu32_mask(*a_key, *b_key);
+    lo_key = _mm512_mask_blend_epi32(cmp, *a_key, *b_key);
+    hi_key = _mm512_mask_blend_epi32(cmp, *b_key, *a_key);
+    lo_pay = _mm512_mask_blend_epi32(cmp, *a_pay, *b_pay);
+    hi_pay = _mm512_mask_blend_epi32(cmp, *b_pay, *a_pay);
+    *a_key = lo_key;
+    *b_key = hi_key;
+    *a_pay = lo_pay;
+    *b_pay = hi_pay;
 
     // Bitonic clean both registers: distances 8,4,2,1
+    
+    // Helper macro for distance-based compare-swap
+    #define CLEAN_STEP_KV(reg_key, reg_pay, shuf_key, shuf_pay, blend_mask) \
+        cmp = _mm512_cmpgt_epu32_mask(*reg_key, shuf_key); \
+        lo_key = _mm512_mask_blend_epi32(cmp, *reg_key, shuf_key); \
+        hi_key = _mm512_mask_blend_epi32(cmp, shuf_key, *reg_key); \
+        lo_pay = _mm512_mask_blend_epi32(cmp, *reg_pay, shuf_pay); \
+        hi_pay = _mm512_mask_blend_epi32(cmp, shuf_pay, *reg_pay); \
+        *reg_key = _mm512_mask_blend_epi32(blend_mask, lo_key, hi_key); \
+        *reg_pay = _mm512_mask_blend_epi32(blend_mask, lo_pay, hi_pay);
+
     // Distance 8
-    __m512i a_shuf = _mm512_permutexvar_epi32(idx_swap8, *a);
-    __m512i b_shuf = _mm512_permutexvar_epi32(idx_swap8, *b);
-    lo = _mm512_min_epu32(*a, a_shuf);
-    hi = _mm512_max_epu32(*a, a_shuf);
-    *a = _mm512_mask_blend_epi32(0xFF00, lo, hi);
-    lo = _mm512_min_epu32(*b, b_shuf);
-    hi = _mm512_max_epu32(*b, b_shuf);
-    *b = _mm512_mask_blend_epi32(0xFF00, lo, hi);
+    __m512i a_key_shuf = _mm512_permutexvar_epi32(idx_swap8, *a_key);
+    __m512i b_key_shuf = _mm512_permutexvar_epi32(idx_swap8, *b_key);
+    __m512i a_pay_shuf = _mm512_permutexvar_epi32(idx_swap8, *a_pay);
+    __m512i b_pay_shuf = _mm512_permutexvar_epi32(idx_swap8, *b_pay);
+    CLEAN_STEP_KV(a_key, a_pay, a_key_shuf, a_pay_shuf, 0xFF00)
+    CLEAN_STEP_KV(b_key, b_pay, b_key_shuf, b_pay_shuf, 0xFF00)
 
     // Distance 4
-    a_shuf = _mm512_permutexvar_epi32(idx_swap4, *a);
-    b_shuf = _mm512_permutexvar_epi32(idx_swap4, *b);
-    lo = _mm512_min_epu32(*a, a_shuf);
-    hi = _mm512_max_epu32(*a, a_shuf);
-    *a = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
-    lo = _mm512_min_epu32(*b, b_shuf);
-    hi = _mm512_max_epu32(*b, b_shuf);
-    *b = _mm512_mask_blend_epi32(0xF0F0, lo, hi);
+    a_key_shuf = _mm512_permutexvar_epi32(idx_swap4, *a_key);
+    b_key_shuf = _mm512_permutexvar_epi32(idx_swap4, *b_key);
+    a_pay_shuf = _mm512_permutexvar_epi32(idx_swap4, *a_pay);
+    b_pay_shuf = _mm512_permutexvar_epi32(idx_swap4, *b_pay);
+    CLEAN_STEP_KV(a_key, a_pay, a_key_shuf, a_pay_shuf, 0xF0F0)
+    CLEAN_STEP_KV(b_key, b_pay, b_key_shuf, b_pay_shuf, 0xF0F0)
 
     // Distance 2 (within-lane, no cross-lane permute needed)
-    a_shuf = _mm512_shuffle_epi32(*a, _MM_SHUFFLE(1,0,3,2));
-    b_shuf = _mm512_shuffle_epi32(*b, _MM_SHUFFLE(1,0,3,2));
-    lo = _mm512_min_epu32(*a, a_shuf);
-    hi = _mm512_max_epu32(*a, a_shuf);
-    *a = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
-    lo = _mm512_min_epu32(*b, b_shuf);
-    hi = _mm512_max_epu32(*b, b_shuf);
-    *b = _mm512_mask_blend_epi32(0xCCCC, lo, hi);
+    a_key_shuf = _mm512_shuffle_epi32(*a_key, _MM_SHUFFLE(1,0,3,2));
+    b_key_shuf = _mm512_shuffle_epi32(*b_key, _MM_SHUFFLE(1,0,3,2));
+    a_pay_shuf = _mm512_shuffle_epi32(*a_pay, _MM_SHUFFLE(1,0,3,2));
+    b_pay_shuf = _mm512_shuffle_epi32(*b_pay, _MM_SHUFFLE(1,0,3,2));
+    CLEAN_STEP_KV(a_key, a_pay, a_key_shuf, a_pay_shuf, 0xCCCC)
+    CLEAN_STEP_KV(b_key, b_pay, b_key_shuf, b_pay_shuf, 0xCCCC)
 
     // Distance 1
-    a_shuf = _mm512_shuffle_epi32(*a, _MM_SHUFFLE(2,3,0,1));
-    b_shuf = _mm512_shuffle_epi32(*b, _MM_SHUFFLE(2,3,0,1));
-    lo = _mm512_min_epu32(*a, a_shuf);
-    hi = _mm512_max_epu32(*a, a_shuf);
-    *a = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
-    lo = _mm512_min_epu32(*b, b_shuf);
-    hi = _mm512_max_epu32(*b, b_shuf);
-    *b = _mm512_mask_blend_epi32(0xAAAA, lo, hi);
+    a_key_shuf = _mm512_shuffle_epi32(*a_key, _MM_SHUFFLE(2,3,0,1));
+    b_key_shuf = _mm512_shuffle_epi32(*b_key, _MM_SHUFFLE(2,3,0,1));
+    a_pay_shuf = _mm512_shuffle_epi32(*a_pay, _MM_SHUFFLE(2,3,0,1));
+    b_pay_shuf = _mm512_shuffle_epi32(*b_pay, _MM_SHUFFLE(2,3,0,1));
+    CLEAN_STEP_KV(a_key, a_pay, a_key_shuf, a_pay_shuf, 0xAAAA)
+    CLEAN_STEP_KV(b_key, b_pay, b_key_shuf, b_pay_shuf, 0xAAAA)
+    
+    #undef CLEAN_STEP_KV
 }
 
 /*
- * Public wrapper for sort_16 (loads indices internally, for external callers).
+ * Public wrapper for sort_16_kv (loads indices internally).
  */
-static inline __m512i sort_16_simd(__m512i v) {
+static inline void sort_16_simd_kv(__m512i *key, __m512i *pay) {
     const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
     const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
     const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
     const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
-    return sort_16_inline(v, swap1, swap2, swap4, swap8);
+    sort_16_inline_kv(key, pay, swap1, swap2, swap4, swap8);
 }
 
 /*
- * Sort 32 elements using SIMD: sort two 16-element registers, then merge them.
+ * Sort 32 elements using SIMD - KV version.
  * Requires arr to be 64-byte aligned.
  */
-static inline void sort_32_simd(uint32_t *arr) {
-    // Load and sort each half (aligned loads for cache efficiency)
-    __m512i a = _mm512_load_epi32(arr);
-    __m512i b = _mm512_load_epi32(arr + 16);
+static inline void sort_32_simd_kv(uint32_t *keys, uint32_t *payload) {
+    // Load keys and payload
+    __m512i a_key = _mm512_load_epi32(keys);
+    __m512i b_key = _mm512_load_epi32(keys + 16);
+    __m512i a_pay = _mm512_load_epi32(payload);
+    __m512i b_pay = _mm512_load_epi32(payload + 16);
     
-    a = sort_16_simd(a);
-    b = sort_16_simd(b);
+    // Sort each half
+    sort_16_simd_kv(&a_key, &a_pay);
+    sort_16_simd_kv(&b_key, &b_pay);
     
-    // Merge the two sorted halves using existing merge network
-    merge_512_registers(&a, &b);
+    // Load merge indices
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+    const __m512i idx_swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
+    const __m512i idx_swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
     
-    // Store results (aligned stores for cache efficiency)
-    _mm512_store_epi32(arr, a);
-    _mm512_store_epi32(arr + 16, b);
+    // Merge the two sorted halves
+    merge_32_inline_kv(&a_key, &b_key, &a_pay, &b_pay, idx_rev, idx_swap8, idx_swap4);
+    
+    // Store results
+    _mm512_store_epi32(keys, a_key);
+    _mm512_store_epi32(keys + 16, b_key);
+    _mm512_store_epi32(payload, a_pay);
+    _mm512_store_epi32(payload + 16, b_pay);
 }
 
 /*
- * OPTIMIZED: Sort 64 elements with all shuffle indices loaded ONCE.
- * Eliminates ~25 redundant memory loads per call vs the nested version.
+ * Sort 64 elements with all shuffle indices loaded ONCE - KV version.
  * Requires arr to be 64-byte aligned.
+ * 
+ * DIFFERENCE FROM ORIGINAL: After SIMD sorting, uses merge_arrays_kv instead
+ * of merge_arrays for the final 32+32 merge.
  */
-static inline void sort_64_simd(uint32_t *arr) {
-    // Load ALL shuffle indices ONCE (sort needs swap1-4-8, merge needs rev-swap8-swap4)
+static inline void sort_64_simd_kv(uint32_t *keys, uint32_t *payload) {
+    // Load ALL shuffle indices ONCE
     const __m512i swap1 = _mm512_load_epi32(SORT_SWAP1_IDX);
     const __m512i swap2 = _mm512_load_epi32(SORT_SWAP2_IDX);
     const __m512i swap4 = _mm512_load_epi32(SORT_SWAP4_IDX);
     const __m512i swap8 = _mm512_load_epi32(SORT_SWAP8_IDX);
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
 
-    // Load all 4 chunks
-    __m512i a = _mm512_load_epi32(arr);
-    __m512i b = _mm512_load_epi32(arr + 16);
-    __m512i c = _mm512_load_epi32(arr + 32);
-    __m512i d = _mm512_load_epi32(arr + 48);
+    // Load all 4 chunks (keys and payload)
+    __m512i a_key = _mm512_load_epi32(keys);
+    __m512i b_key = _mm512_load_epi32(keys + 16);
+    __m512i c_key = _mm512_load_epi32(keys + 32);
+    __m512i d_key = _mm512_load_epi32(keys + 48);
+    __m512i a_pay = _mm512_load_epi32(payload);
+    __m512i b_pay = _mm512_load_epi32(payload + 16);
+    __m512i c_pay = _mm512_load_epi32(payload + 32);
+    __m512i d_pay = _mm512_load_epi32(payload + 48);
 
-    // Sort each 16-element chunk using pre-loaded indices
-    a = sort_16_inline(a, swap1, swap2, swap4, swap8);
-    b = sort_16_inline(b, swap1, swap2, swap4, swap8);
-    c = sort_16_inline(c, swap1, swap2, swap4, swap8);
-    d = sort_16_inline(d, swap1, swap2, swap4, swap8);
+    // Sort each 16-element chunk
+    sort_16_inline_kv(&a_key, &a_pay, swap1, swap2, swap4, swap8);
+    sort_16_inline_kv(&b_key, &b_pay, swap1, swap2, swap4, swap8);
+    sort_16_inline_kv(&c_key, &c_pay, swap1, swap2, swap4, swap8);
+    sort_16_inline_kv(&d_key, &d_pay, swap1, swap2, swap4, swap8);
 
     // Merge into two 32-element sorted sequences
-    // Note: swap4 == SORT_SWAP4_IDX, but IDX_SWAP4 from merge.h has same values
-    merge_32_inline(&a, &b, idx_rev, swap8, swap4);
-    merge_32_inline(&c, &d, idx_rev, swap8, swap4);
+    merge_32_inline_kv(&a_key, &b_key, &a_pay, &b_pay, idx_rev, swap8, swap4);
+    merge_32_inline_kv(&c_key, &d_key, &c_pay, &d_pay, idx_rev, swap8, swap4);
 
     // Store temporary results for final merge
-    _mm512_store_epi32(arr, a);
-    _mm512_store_epi32(arr + 16, b);
-    _mm512_store_epi32(arr + 32, c);
-    _mm512_store_epi32(arr + 48, d);
+    _mm512_store_epi32(keys, a_key);
+    _mm512_store_epi32(keys + 16, b_key);
+    _mm512_store_epi32(keys + 32, c_key);
+    _mm512_store_epi32(keys + 48, d_key);
+    _mm512_store_epi32(payload, a_pay);
+    _mm512_store_epi32(payload + 16, b_pay);
+    _mm512_store_epi32(payload + 32, c_pay);
+    _mm512_store_epi32(payload + 48, d_pay);
 
-    // Merge the two 32-element sorted runs
-    uint32_t temp[64] __attribute__((aligned(64)));
-    merge_arrays(arr, 32, arr + 32, 32, temp);
-    memcpy(arr, temp, 64 * sizeof(uint32_t));
+    // Merge the two 32-element sorted runs using KV merge
+    uint32_t temp_key[64] __attribute__((aligned(64)));
+    uint32_t temp_pay[64] __attribute__((aligned(64)));
+    merge_arrays_kv(keys, payload, 32, keys + 32, payload + 32, 32, temp_key, temp_pay);
+    memcpy(keys, temp_key, 64 * sizeof(uint32_t));
+    memcpy(payload, temp_pay, 64 * sizeof(uint32_t));
 }
 
 // Base case threshold - must be multiple of 32 for SIMD efficiency
 #define SORT_THRESHOLD 64
 
 // L3 cache size: 32 MiB = 8M uint32_t elements
-// Sort entire chunks of this size before moving on (cache locality optimization)
-#define L3_CHUNK_ELEMENTS (4 * 1024 * 1024)
+// For KV, we have 2x data, so use half the chunk size
+#define L3_CHUNK_ELEMENTS (2 * 1024 * 1024)  // DIFFERENCE: Half of non-KV version
 
 // Threshold for parallel merge (below this, use sequential merge)
-// 64K elements = 256KB, small enough to fit in L2 cache
 #define PARALLEL_MERGE_THRESHOLD (64 * 1024)
 
-// ============== Parallel Merge Implementation ==============
+// ============== Parallel Merge Implementation (KV Version) ==============
 
 /*
  * Find split point for parallel merge using binary search.
- * Given two sorted arrays, find indices (i, j) such that:
- *   - i + j = target (approximately half the total elements)
- *   - All elements in left[0..i) and right[0..j) are <= all elements in left[i..] and right[j..]
+ * Same as non-KV version - only looks at keys.
  */
-static void find_merge_split(
-    uint32_t *left, size_t left_size,
-    uint32_t *right, size_t right_size,
+static void find_merge_split_kv(
+    uint32_t *left_key, size_t left_size,
+    uint32_t *right_key, size_t right_size,
     size_t *out_i, size_t *out_j
 ) {
     size_t total = left_size + right_size;
     size_t target = total / 2;
     
-    // Binary search bounds
     size_t lo = (target > right_size) ? (target - right_size) : 0;
     size_t hi = (target < left_size) ? target : left_size;
     
@@ -286,111 +322,118 @@ static void find_merge_split(
         size_t i = lo + (hi - lo) / 2;
         size_t j = target - i;
         
-        // Check if this is a valid split point
-        // We need: left[i-1] <= right[j] AND right[j-1] <= left[i]
-        if (j > 0 && i < left_size && right[j - 1] > left[i]) {
-            lo = i + 1;  // Need more from left
-        } else if (i > 0 && j < right_size && left[i - 1] > right[j]) {
-            hi = i;      // Need less from left
+        if (j > 0 && i < left_size && right_key[j - 1] > left_key[i]) {
+            lo = i + 1;
+        } else if (i > 0 && j < right_size && left_key[i - 1] > right_key[j]) {
+            hi = i;
         } else {
-            // Found valid split
             *out_i = i;
             *out_j = j;
             return;
         }
     }
     
-    // Use the final position
     *out_i = lo;
     *out_j = target - lo;
 }
 
+// Scalar merge for KV (used by merge_arrays_kv internally, but we need a local version)
+static void merge_local_kv_inline(
+    uint32_t* left_key, uint32_t* left_pay,
+    uint32_t* right_key, uint32_t* right_pay,
+    uint32_t* out_key, uint32_t* out_pay,
+    size_t size_left, size_t size_right
+) {
+    size_t i = 0, j = 0, k = 0;
+    while (i < size_left && j < size_right) {
+        if (left_key[i] <= right_key[j]) {
+            out_key[k] = left_key[i];
+            out_pay[k] = left_pay[i];
+            i++; k++;
+        } else {
+            out_key[k] = right_key[j];
+            out_pay[k] = right_pay[j];
+            j++; k++;
+        }
+    }
+    if (i < size_left) {
+        memcpy(out_key + k, left_key + i, (size_left - i) * sizeof(uint32_t));
+        memcpy(out_pay + k, left_pay + i, (size_left - i) * sizeof(uint32_t));
+    } else if (j < size_right) {
+        memcpy(out_key + k, right_key + j, (size_right - j) * sizeof(uint32_t));
+        memcpy(out_pay + k, right_pay + j, (size_right - j) * sizeof(uint32_t));
+    }
+}
+
 /*
- * Parallel merge using OpenMP tasks.
- * Recursively splits the merge into independent sub-merges.
+ * Parallel merge for KV version.
  * 
- * Parameters:
- *   left, left_size: First sorted array (may be unaligned)
- *   right, right_size: Second sorted array (may be unaligned)
- *   out: Output array (MUST be 64-byte aligned, and out+output positions must be aligned)
- *   depth: Remaining recursion depth (controls parallelism)
+ * DIFFERENCE FROM ORIGINAL: No merge_arrays_unaligned_kv exists yet, so we
+ * fall back to scalar merge for unaligned inputs. This may be slower for
+ * deeply nested parallel merges.
  */
-static void parallel_merge_impl(
-    uint32_t *left, size_t left_size,
-    uint32_t *right, size_t right_size,
-    uint32_t *out,
+static void parallel_merge_impl_kv(
+    uint32_t *left_key, uint32_t *left_pay, size_t left_size,
+    uint32_t *right_key, uint32_t *right_pay, size_t right_size,
+    uint32_t *out_key, uint32_t *out_pay,
     int depth
 ) {
     size_t total = left_size + right_size;
     
     // Base case: small enough or no more parallelism
     if (depth <= 0 || total < PARALLEL_MERGE_THRESHOLD) {
-        // Check alignment of inputs
-        int left_aligned = ((uintptr_t)left % 64) == 0;
-        int right_aligned = ((uintptr_t)right % 64) == 0;
+        // Check alignment
+        int left_aligned = ((uintptr_t)left_key % 64) == 0 && ((uintptr_t)left_pay % 64) == 0;
+        int right_aligned = ((uintptr_t)right_key % 64) == 0 && ((uintptr_t)right_pay % 64) == 0;
         
         if (left_aligned && right_aligned) {
-            merge_arrays(left, left_size, right, right_size, out);
+            merge_arrays_kv(left_key, left_pay, left_size,
+                           right_key, right_pay, right_size,
+                           out_key, out_pay);
         } else {
-            merge_arrays_unaligned(left, left_size, right, right_size, out);
+            // DIFFERENCE: No unaligned KV merge, use scalar fallback
+            merge_local_kv_inline(left_key, left_pay, right_key, right_pay,
+                                  out_key, out_pay, left_size, right_size);
         }
         return;
     }
     
     // Find split point
     size_t i, j;
-    find_merge_split(left, left_size, right, right_size, &i, &j);
-    
-    // Round split points to 16-element boundaries for output alignment
-    // This ensures out + (i + j) is 64-byte aligned if out is aligned
-    size_t i_aligned = (i / 16) * 16;
-    size_t j_aligned = (j / 16) * 16;
-    
-    // Adjust to maintain merge correctness
-    // We need to find valid split that's close to aligned boundaries
-    if (i_aligned != i || j_aligned != j) {
-        // Find the nearest valid aligned split
-        // Try rounding down first
-        size_t new_target = i_aligned + j_aligned;
-        if (new_target > 0 && new_target < total) {
-            find_merge_split(left, left_size, right, right_size, &i, &j);
-            // Accept whatever split we get - the unaligned merge will handle it
-        }
-    }
+    find_merge_split_kv(left_key, left_size, right_key, right_size, &i, &j);
     
     size_t out_split = i + j;
     
     // Spawn parallel tasks for the two halves
     #pragma omp task
-    parallel_merge_impl(left, i, right, j, out, depth - 1);
+    parallel_merge_impl_kv(left_key, left_pay, i,
+                           right_key, right_pay, j,
+                           out_key, out_pay, depth - 1);
     
     #pragma omp task
-    parallel_merge_impl(left + i, left_size - i, 
-                        right + j, right_size - j,
-                        out + out_split, depth - 1);
+    parallel_merge_impl_kv(left_key + i, left_pay + i, left_size - i,
+                           right_key + j, right_pay + j, right_size - j,
+                           out_key + out_split, out_pay + out_split, depth - 1);
     
     #pragma omp taskwait
 }
 
-/*
- * Public interface for parallel merge.
- * Automatically determines recursion depth based on thread count.
- */
-static void parallel_merge(
-    uint32_t *left, size_t left_size,
-    uint32_t *right, size_t right_size,
-    uint32_t *out
+static void parallel_merge_kv(
+    uint32_t *left_key, uint32_t *left_pay, size_t left_size,
+    uint32_t *right_key, uint32_t *right_pay, size_t right_size,
+    uint32_t *out_key, uint32_t *out_pay
 ) {
-    // Calculate depth: log2(num_threads) levels of parallelism
     int depth = 0;
     for (int t = NUM_THREADS; t > 1; t /= 2) depth++;
-    depth += 1;  // One extra level for better load balancing
+    depth += 1;
     
     #pragma omp parallel
     {
         #pragma omp single
         {
-            parallel_merge_impl(left, left_size, right, right_size, out, depth);
+            parallel_merge_impl_kv(left_key, left_pay, left_size,
+                                   right_key, right_pay, right_size,
+                                   out_key, out_pay, depth);
         }
     }
 }
@@ -402,40 +445,39 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-
-
-// Sort a single chunk with ALL threads collaborating (cache-friendly)
-// All threads work on the SAME chunk, keeping data hot in L3 cache
-static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
+// Sort a single chunk with ALL threads collaborating - KV version
+static void sort_chunk_parallel_kv(uint32_t *keys, uint32_t *payload, size_t chunk_size,
+                                    uint32_t *temp_key, uint32_t *temp_pay) {
     // Step 1: Base case sort (64-element chunks) - PARALLEL within chunk
     size_t num_64_blocks = chunk_size / 64;
     size_t remainder_start = num_64_blocks * 64;
     
     #pragma omp parallel for schedule(static)
     for (size_t b = 0; b < num_64_blocks; b++) {
-        sort_64_simd(arr + b * 64);
+        sort_64_simd_kv(keys + b * 64, payload + b * 64);
     }
     
     // Handle remainder (single thread, small work)
     if (remainder_start + 32 <= chunk_size) {
-        sort_32_simd(arr + remainder_start);
+        sort_32_simd_kv(keys + remainder_start, payload + remainder_start);
         remainder_start += 32;
     }
     if (remainder_start < chunk_size) {
-        insertion_sort(arr + remainder_start, chunk_size - remainder_start);
+        insertion_sort_kv(keys + remainder_start, payload + remainder_start,
+                          chunk_size - remainder_start);
     }
     
     // Step 2: Merge passes within this chunk
-    uint32_t *src = arr;
-    uint32_t *dst = temp;
+    uint32_t *src_key = keys;
+    uint32_t *src_pay = payload;
+    uint32_t *dst_key = temp_key;
+    uint32_t *dst_pay = temp_pay;
     
     for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
         if (num_pairs > 1) {
-            // MULTIPLE PAIRS: Use parallel for - each thread handles one or more merges
-            // This is better than parallel merge because merge is memory-bound
-            // and multiple independent merges can saturate memory bandwidth better
+            // MULTIPLE PAIRS: Use parallel for
             #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
@@ -445,101 +487,50 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 size_t right_start = left_start + left_size;
                 
                 if (right_start >= chunk_size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                    memcpy(dst_key + left_start, src_key + left_start, left_size * sizeof(uint32_t));
+                    memcpy(dst_pay + left_start, src_pay + left_start, left_size * sizeof(uint32_t));
                 } else {
                     size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-                    // Use CACHED merge - keeps data in L3 for next merge pass
-                    merge_arrays_cached(src + left_start, left_size, 
-                                        src + right_start, right_size, 
-                                        dst + left_start);
+                    // Use CACHED KV merge
+                    merge_arrays_cached_kv(src_key + left_start, src_pay + left_start, left_size,
+                                           src_key + right_start, src_pay + right_start, right_size,
+                                           dst_key + left_start, dst_pay + left_start);
                 }
             }
         } else {
-            // SINGLE PAIR: Use parallel merge - all threads collaborate on one large merge
-            // Streaming stores are OK here since this is the final pass before Phase 2
+            // SINGLE PAIR: Use parallel merge
             size_t left_size = (width <= chunk_size) ? width : chunk_size;
             size_t right_start = left_size;
             
             if (right_start < chunk_size) {
                 size_t right_size = chunk_size - right_start;
-                parallel_merge(src, left_size, src + right_start, right_size, dst);
+                parallel_merge_kv(src_key, src_pay, left_size,
+                                  src_key + right_start, src_pay + right_start, right_size,
+                                  dst_key, dst_pay);
             } else {
-                memcpy(dst, src, chunk_size * sizeof(uint32_t));
+                memcpy(dst_key, src_key, chunk_size * sizeof(uint32_t));
+                memcpy(dst_pay, src_pay, chunk_size * sizeof(uint32_t));
             }
         }
         
         // Swap src and dst
-        uint32_t *swap = src;
-        src = dst;
-        dst = swap;
+        uint32_t *swap_key = src_key; src_key = dst_key; dst_key = swap_key;
+        uint32_t *swap_pay = src_pay; src_pay = dst_pay; dst_pay = swap_pay;
     }
     
-    // Copy result back to arr if needed - PARALLEL copy
-    if (src != arr) {
+    // Copy result back if needed - PARALLEL copy
+    if (src_key != keys) {
         #pragma omp parallel for schedule(static)
         for (size_t i = 0; i < chunk_size; i += 4096) {
             size_t copy_size = (i + 4096 <= chunk_size) ? 4096 : (chunk_size - i);
-            memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
+            memcpy(keys + i, src_key + i, copy_size * sizeof(uint32_t));
+            memcpy(payload + i, src_pay + i, copy_size * sizeof(uint32_t));
         }
     }
 }
 
-// Original single-threaded version (for comparison or fallback)
-static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
-    // Step 1: Base case sort (64-element chunks)
-    size_t i = 0;
-    for (; i + 64 <= chunk_size; i += 64) {
-        sort_64_simd(arr + i);
-    }
-    if (i + 32 <= chunk_size) {
-        sort_32_simd(arr + i);
-        i += 32;
-    }
-    if (i < chunk_size) {
-        insertion_sort(arr + i, chunk_size - i);
-    }
-    
-    // Step 2: All merge passes within this chunk
-    uint32_t *src = arr;
-    uint32_t *dst = temp;
-    
-    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
-        size_t j = 0;
-        while (j < chunk_size) {
-            size_t left_start = j;
-            size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
-            size_t right_start = left_start + left_size;
-            size_t right_size = 0;
-            
-            if (right_start < chunk_size) {
-                right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-            }
-            
-            if (right_size == 0) {
-                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
-            } else {
-                merge_arrays(src + left_start, left_size, 
-                           src + right_start, right_size, 
-                           dst + left_start);
-            }
-            
-            j = right_start + right_size;
-        }
-        
-        // Swap src and dst
-        uint32_t *swap = src;
-        src = dst;
-        dst = swap;
-    }
-    
-    // Copy result back to arr if needed
-    if (src != arr) {
-        memcpy(arr, src, chunk_size * sizeof(uint32_t));
-    }
-}
-
-// Bottom-up merge sort with L3 cache blocking and OpenMP parallelization
-void basic_merge_sort(uint32_t *arr, size_t size) {
+// Bottom-up merge sort with L3 cache blocking - KV version
+void basic_merge_sort_kv(uint32_t *keys, uint32_t *payload, size_t size) {
     if (size <= 1) return;
     
     double t_start, t_end;
@@ -547,50 +538,50 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     // Set number of threads
     omp_set_num_threads(NUM_THREADS);
     
-    // Allocate temp buffer (reused for all operations)
-    uint32_t *temp = NULL;
-    if (posix_memalign((void**)&temp, 64, size * sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "posix_memalign failed for temp buffer\n");
+    // Allocate temp buffers for both keys and payload
+    uint32_t *temp_key = NULL;
+    uint32_t *temp_pay = NULL;
+    if (posix_memalign((void**)&temp_key, 64, size * sizeof(uint32_t)) != 0 ||
+        posix_memalign((void**)&temp_pay, 64, size * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "posix_memalign failed for temp buffers\n");
         exit(EXIT_FAILURE);
     }
     
-    // Warmup temp buffer to avoid page fault overhead
+    // Warmup temp buffers
     t_start = get_time_sec();
     #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < size; i += 4096 / sizeof(uint32_t)) {
-        temp[i] = 0;  // Touch one element per page (4KB pages)
+        temp_key[i] = 0;
+        temp_pay[i] = 0;
     }
     t_end = get_time_sec();
-    printf("  [Warmup] temp buffer (page faults): %.3f sec\n", t_end - t_start);
+    printf("  [Warmup] temp buffers (page faults): %.3f sec\n", t_end - t_start);
     
     // ========== Phase 1: Sort each L3-sized chunk ==========
-    // Process ONE chunk at a time, but parallelize WITHIN each chunk
-    // This keeps all threads focused on the same L3-resident data (cache-friendly)
     t_start = get_time_sec();
     size_t num_chunks = (size + L3_CHUNK_ELEMENTS - 1) / L3_CHUNK_ELEMENTS;
     
     for (size_t c = 0; c < num_chunks; c++) {
         size_t start = c * L3_CHUNK_ELEMENTS;
         size_t chunk_size = (start + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - start);
-        // All threads collaborate on THIS chunk (data stays in L3)
-        sort_chunk_parallel(arr + start, chunk_size, temp + start);
+        sort_chunk_parallel_kv(keys + start, payload + start, chunk_size,
+                               temp_key + start, temp_pay + start);
     }
     t_end = get_time_sec();
-    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
-           num_chunks, t_end - t_start, NUM_THREADS);
+    printf("  [Phase 1] Sort %zu L3 chunks (%d elements each): %.3f sec (%d threads)\n", 
+           num_chunks, L3_CHUNK_ELEMENTS, t_end - t_start, NUM_THREADS);
     
     // ========== Phase 2: Merge L3-sized chunks together ==========
-    // Only continue while we can use all threads for separate merges
     if (size > L3_CHUNK_ELEMENTS) {
-        uint32_t *src = arr;
-        uint32_t *dst = temp;
+        uint32_t *src_key = keys;
+        uint32_t *src_pay = payload;
+        uint32_t *dst_key = temp_key;
+        uint32_t *dst_pay = temp_pay;
         size_t width = L3_CHUNK_ELEMENTS;
         
-        // Only do parallel merges while num_pairs >= NUM_THREADS
         while (width < size) {
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
             
-            // Stop L3 optimization when we can't use all threads
             if (num_pairs < (size_t)NUM_THREADS) {
                 printf("  [Phase 2] Stopping L3 merge at width %zu (%zu pairs < %d threads)\n", 
                        width, num_pairs, NUM_THREADS);
@@ -599,7 +590,6 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             
             t_start = get_time_sec();
             
-            // Each thread handles one merge (simple parallelism)
             #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
@@ -609,28 +599,27 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
                 size_t right_start = left_start + left_size;
                 
                 if (right_start >= size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                    memcpy(dst_key + left_start, src_key + left_start, left_size * sizeof(uint32_t));
+                    memcpy(dst_pay + left_start, src_pay + left_start, left_size * sizeof(uint32_t));
                 } else {
                     size_t right_size = (right_start + width <= size) ? width : (size - right_start);
-                    merge_arrays(src + left_start, left_size, 
-                               src + right_start, right_size, 
-                               dst + left_start);
+                    merge_arrays_kv(src_key + left_start, src_pay + left_start, left_size,
+                                    src_key + right_start, src_pay + right_start, right_size,
+                                    dst_key + left_start, dst_pay + left_start);
                 }
             }
             t_end = get_time_sec();
-            double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
+            double throughput = (2 * size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;  // 2x for KV
             printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %.2f GB/s)\n", 
                    width, t_end - t_start, num_pairs, throughput);
             
-            // Swap src and dst
-            uint32_t *swap = src;
-            src = dst;
-            dst = swap;
+            // Swap
+            uint32_t *swap = src_key; src_key = dst_key; dst_key = swap;
+            swap = src_pay; src_pay = dst_pay; dst_pay = swap;
             width *= 2;
         }
         
-        // Finish remaining merges with PARALLEL MERGE (all threads collaborate on each merge)
-        // Now with alignment preamble, streaming stores work even for unaligned sub-merges!
+        // Finish with parallel merge
         while (width < size) {
             t_start = get_time_sec();
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
@@ -643,47 +632,84 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
                 size_t right_start = left_start + left_size;
                 
                 if (right_start >= size) {
-                    // Just copy with parallel memcpy
                     #pragma omp parallel for schedule(static)
                     for (size_t i = 0; i < left_size; i += 4096) {
                         size_t copy_size = (i + 4096 <= left_size) ? 4096 : (left_size - i);
-                        memcpy(dst + left_start + i, src + left_start + i, copy_size * sizeof(uint32_t));
+                        memcpy(dst_key + left_start + i, src_key + left_start + i, copy_size * sizeof(uint32_t));
+                        memcpy(dst_pay + left_start + i, src_pay + left_start + i, copy_size * sizeof(uint32_t));
                     }
                 } else {
                     size_t right_size = (right_start + width <= size) ? width : (size - right_start);
-                    // Use parallel merge - all threads collaborate, streaming stores with alignment preamble
-                    parallel_merge(src + left_start, left_size, 
-                                   src + right_start, right_size, 
-                                   dst + left_start);
+                    parallel_merge_kv(src_key + left_start, src_pay + left_start, left_size,
+                                      src_key + right_start, src_pay + right_start, right_size,
+                                      dst_key + left_start, dst_pay + left_start);
                 }
             }
             
             t_end = get_time_sec();
-            double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
+            double throughput = (2 * size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
             printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %d threads, %.2f GB/s)\n", 
                    width, t_end - t_start, num_pairs, NUM_THREADS, throughput);
             
-            // Swap src and dst
-            uint32_t *swap = src;
-            src = dst;
-            dst = swap;
+            uint32_t *swap = src_key; src_key = dst_key; dst_key = swap;
+            swap = src_pay; src_pay = dst_pay; dst_pay = swap;
             width *= 2;
         }
         
-        // Copy result back to arr if needed - PARALLEL copy
-        if (src != arr) {
+        // Copy result back if needed
+        if (src_key != keys) {
             t_start = get_time_sec();
             #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < size; i += 4096) {
                 size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
-                memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
+                memcpy(keys + i, src_key + i, copy_size * sizeof(uint32_t));
+                memcpy(payload + i, src_pay + i, copy_size * sizeof(uint32_t));
             }
             t_end = get_time_sec();
             printf("  [Final ] Copy back: %.3f sec\n", t_end - t_start);
         }
     }
     
-    free(temp);
+    free(temp_key);
+    free(temp_pay);
+}
+
+// ============== Stability Analysis ==============
+
+/*
+ * Count stability violations: for each pair of elements with equal keys,
+ * count how many have their original order reversed.
+ */
+static size_t count_stability_violations(uint32_t *keys, uint32_t *payload, size_t size) {
+    size_t violations = 0;
+    
+    for (size_t i = 0; i + 1 < size; i++) {
+        // Check consecutive elements with equal keys
+        if (keys[i] == keys[i + 1]) {
+            // In a stable sort, if key[i] == key[i+1], then payload[i] < payload[i+1]
+            // (original order preserved)
+            if (payload[i] > payload[i + 1]) {
+                violations++;
+            }
+        }
+    }
+    
+    return violations;
+}
+
+/*
+ * Count total pairs of equal keys (for stability percentage calculation)
+ */
+static size_t count_equal_key_pairs(uint32_t *keys, size_t size) {
+    size_t equal_pairs = 0;
+    
+    for (size_t i = 0; i + 1 < size; i++) {
+        if (keys[i] == keys[i + 1]) {
+            equal_pairs++;
+        }
+    }
+    
+    return equal_pairs;
 }
 
 int main(int argc, char *argv[]) {
@@ -694,22 +720,36 @@ int main(int argc, char *argv[]) {
 
     // Read array from input file
     uint64_t size;
-    uint32_t *arr = read_array_from_file(argv[1], &size);
-    if (!arr) {
+    uint32_t *keys = read_array_from_file(argv[1], &size);
+    if (!keys) {
         return 1;
     }
 
     printf("Read %lu elements from %s\n", size, argv[1]);
 
-    // Compute hash before sorting (order-independent)
+    // Allocate and initialize payload with original indices
+    uint32_t *payload = NULL;
+    if (posix_memalign((void**)&payload, 64, size * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "posix_memalign failed for payload\n");
+        free(keys);
+        return 1;
+    }
+    
+    // Initialize payload: payload[i] = i (original index)
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < size; i++) {
+        payload[i] = (uint32_t)i;
+    }
+
+    // Compute hash before sorting
     uint64_t xor_before, sum_before;
-    compute_hash(arr, size, &xor_before, &sum_before);
+    compute_hash(keys, size, &xor_before, &sum_before);
     printf("Input hash: XOR=0x%016lx SUM=0x%016lx\n", xor_before, sum_before);
 
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    basic_merge_sort(arr, size);
+    basic_merge_sort_kv(keys, payload, size);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
@@ -717,39 +757,44 @@ int main(int argc, char *argv[]) {
 
     // Compute hash after sorting
     uint64_t xor_after, sum_after;
-    compute_hash(arr, size, &xor_after, &sum_after);
+    compute_hash(keys, size, &xor_after, &sum_after);
     printf("Output hash: XOR=0x%016lx SUM=0x%016lx\n", xor_after, sum_after);
 
-    // Verify hashes match (same elements, just reordered)
+    // Verify hashes match
     if (xor_before != xor_after || sum_before != sum_after) {
         printf("Error: Hash mismatch! Elements were lost or corrupted during sorting.\n");
-        free(arr);
+        free(keys);
+        free(payload);
         return 1;
     }
     printf("Hash check passed: all elements preserved.\n");
 
-    // Only print array if small enough
-    if (size <= 10) {
-        print_array(arr, size);
-    }
-
     // Verify the array is sorted
-    if (verify_sortedness(arr, size)) {
+    if (verify_sortedness(keys, size)) {
         printf("Array sorted successfully!\n");
     } else {
         printf("Error: Array is not sorted correctly!\n");
-        free(arr);
+        free(keys);
+        free(payload);
         return 1;
     }
 
-    // Write sorted array to output file
-    // if (write_array_to_file(argv[2], arr, size) != 0) {
-    //     free(arr);
-    //     return 1;
-    // }
+    // ========== STABILITY ANALYSIS ==========
+    size_t equal_pairs = count_equal_key_pairs(keys, size);
+    size_t violations = count_stability_violations(keys, payload, size);
+    
+    printf("\n=== STABILITY ANALYSIS ===\n");
+    printf("Adjacent pairs with equal keys: %zu\n", equal_pairs);
+    printf("Stability violations: %zu\n", violations);
+    if (equal_pairs > 0) {
+        double stability_pct = 100.0 * (1.0 - (double)violations / equal_pairs);
+        printf("Stability score: %.2f%% (%.2f%% of equal-key pairs preserved order)\n",
+               stability_pct, stability_pct);
+    } else {
+        printf("No duplicate keys found - stability not applicable.\n");
+    }
 
-    free(arr);
+    free(keys);
+    free(payload);
     return 0;
 }
-       
-
