@@ -9,7 +9,7 @@
 #include "utils.h"
 
 #define NUM_THREADS 16
-#define RADIX_BITS 11
+#define RADIX_BITS 8
 #define RADIX_SIZE (1 << RADIX_BITS)  // 256 buckets
 #define RADIX_MASK (RADIX_SIZE - 1)
 
