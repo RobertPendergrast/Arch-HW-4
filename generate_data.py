@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-DISTRIBUTIONS = ['uniform', 'normal', 'pareto', 'sorted', 'reverse', 'nearly', 'same']
+DISTRIBUTIONS = ['uniform', 'normal', 'pareto', 'sorted', 'reverse', 'nearly']
 
 
 def write_binary_array(filename: str, data: np.ndarray) -> float:
@@ -59,11 +59,6 @@ def generate_nearly(size: int) -> np.ndarray:
     return data
 
 
-def generate_same(size: int) -> np.ndarray:
-    """All same value (42)."""
-    return np.full(size, 42, dtype=np.uint32)
-
-
 GENERATORS = {
     'uniform': generate_uniform,
     'normal': generate_normal,
@@ -71,7 +66,6 @@ GENERATORS = {
     'sorted': generate_sorted,
     'reverse': generate_reverse,
     'nearly': generate_nearly,
-    'same': generate_same,
 }
 
 

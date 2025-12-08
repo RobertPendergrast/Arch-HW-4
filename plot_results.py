@@ -44,7 +44,7 @@ def plot_results(csv_filename='multi_sort_results.csv', output_file='multi_sort_
     threads, total_times, phase1_times, phase2_times = read_csv_data(csv_filename)
     
     # Create figure and axis
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
     
     # X positions for bars
     x = np.arange(len(threads))
@@ -57,8 +57,8 @@ def plot_results(csv_filename='multi_sort_results.csv', output_file='multi_sort_
                    label='Phase 2 (Merge)', color='#A23B72', alpha=0.8)
     
     # Customize axes
-    ax.set_xlabel('Number of Threads', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Time (seconds)', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Number of Threads', fontsize=15, fontweight='bold')
+    ax.set_ylabel('Time (seconds)', fontsize=15, fontweight='bold')
     
     # Set x-axis labels
     ax.set_xticks(x)
