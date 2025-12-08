@@ -583,7 +583,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
            num_chunks, t_end - t_start, NUM_THREADS);
     
     // ========== Phase 2: Merge L3-sized chunks together ==========
-    // Strategy: parallel for when multiple pairs, parallel merge only for single pair
+    // Strategy: Use parallel merges within each pair when few pairs exist
     if (size > L3_CHUNK_ELEMENTS) {
         uint32_t *src = arr;
         uint32_t *dst = temp;
@@ -594,8 +594,8 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             // Calculate number of merge pairs at this width
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
             
-            if (num_pairs > 1) {
-                // MULTIPLE PAIRS: Parallel for - better for memory-bound work
+            if (num_pairs >= (size_t)NUM_THREADS) {
+                // MANY PAIRS: Each thread handles one merge (simple parallelism)
                 #pragma omp parallel for schedule(dynamic, 1)
                 for (size_t p = 0; p < num_pairs; p++) {
                     size_t left_start = p * 2 * width;
@@ -615,28 +615,37 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
                 }
                 t_end = get_time_sec();
                 double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-                printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n", 
+                printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu parallel merges, %.2f GB/s)\n", 
                        width, t_end - t_start, num_pairs, throughput);
             } else {
-                // SINGLE PAIR: Use parallel merge - only case where it helps
-                size_t left_size = (width <= size) ? width : size;
-                size_t right_start = left_size;
-                
-                if (right_start < size) {
-                    size_t right_size = size - right_start;
-                    parallel_merge(src, left_size, src + right_start, right_size, dst);
-                } else {
-                    // Just copy
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < size; i += 4096) {
-                        size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
-                        memcpy(dst + i, src + i, copy_size * sizeof(uint32_t));
+                // FEW PAIRS: Use parallel merge WITHIN each pair
+                // Each merge is parallelized internally using tasks
+                for (size_t p = 0; p < num_pairs; p++) {
+                    size_t left_start = p * 2 * width;
+                    if (left_start >= size) continue;
+                    
+                    size_t left_size = (left_start + width <= size) ? width : (size - left_start);
+                    size_t right_start = left_start + left_size;
+                    
+                    if (right_start >= size) {
+                        // Odd chunk - parallel copy
+                        #pragma omp parallel for schedule(static)
+                        for (size_t i = 0; i < left_size; i += 4096) {
+                            size_t copy_size = (i + 4096 <= left_size) ? 4096 : (left_size - i);
+                            memcpy(dst + left_start + i, src + left_start + i, copy_size * sizeof(uint32_t));
+                        }
+                    } else {
+                        size_t right_size = (right_start + width <= size) ? width : (size - right_start);
+                        // Use PARALLEL MERGE - all threads collaborate on this single merge
+                        parallel_merge(src + left_start, left_size, 
+                                      src + right_start, right_size, 
+                                      dst + left_start);
                     }
                 }
                 t_end = get_time_sec();
                 double throughput = (size * sizeof(uint32_t)) / (t_end - t_start) / 1e9;
-                printf("  [Phase 2] Merge width %10zu: %.3f sec (PARALLEL merge, %.2f GB/s)\n", 
-                       width, t_end - t_start, throughput);
+                printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu PARALLEL merges, %d threads/merge, %.2f GB/s)\n", 
+                       width, t_end - t_start, num_pairs, NUM_THREADS, throughput);
             }
             
             // Swap src and dst
