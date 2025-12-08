@@ -27,33 +27,8 @@ static inline double get_time_sec(void) {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// ============== Streaming Store Flush for Keys and Values ==============
-
-// Flush key buffer (aligned path)
-static inline void flush_key_buffer_aligned(uint32_t *buf, uint32_t *out, int count) {
-    int full_lines = count / 16;
-    for (int line = 0; line < full_lines; line++) {
-        __m512i v = _mm512_load_si512((__m512i*)(buf + line * 16));
-        _mm512_stream_si512((__m512i*)(out + line * 16), v);
-    }
-    int tail_start = full_lines * 16;
-    for (int j = tail_start; j < count; j++) {
-        out[j] = buf[j];
-    }
-}
-
-// Flush value buffer (aligned path) - same as key, but separate for clarity
-static inline void flush_val_buffer_aligned(uint32_t *buf, uint32_t *out, int count) {
-    int full_lines = count / 16;
-    for (int line = 0; line < full_lines; line++) {
-        __m512i v = _mm512_load_si512((__m512i*)(buf + line * 16));
-        _mm512_stream_si512((__m512i*)(out + line * 16), v);
-    }
-    int tail_start = full_lines * 16;
-    for (int j = tail_start; j < count; j++) {
-        out[j] = buf[j];
-    }
-}
+// ============== Streaming Store with SIMD De-interleaving ==============
+// Interleaved buffer format: [k0,v0,k1,v1,k2,v2,...] -> separate keys[] and vals[]
 
 // ============== LSD Radix Sort for Key-Value Pairs ==============
 // Keys: 32-bit unsigned integers (sort key)
@@ -72,13 +47,21 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
     double t_start, t_end;
     
     // Allocate output buffers for keys and values
-    size_t alloc_size = size * sizeof(uint32_t);
+    // Note: aligned_alloc requires size to be a multiple of alignment
+    size_t min_size = size * sizeof(uint32_t);
+    size_t huge_page_size = 2 * 1024 * 1024;
+    size_t cache_line_size = 64;
     
-    uint32_t *temp_keys = (uint32_t*)aligned_alloc(2 * 1024 * 1024, alloc_size);
-    if (!temp_keys) temp_keys = (uint32_t*)aligned_alloc(64, alloc_size);
+    // Round up to huge page boundary for huge page allocation
+    size_t alloc_size_huge = ((min_size + huge_page_size - 1) / huge_page_size) * huge_page_size;
+    // Round up to cache line for fallback
+    size_t alloc_size_aligned = ((min_size + cache_line_size - 1) / cache_line_size) * cache_line_size;
     
-    uint32_t *temp_values = (uint32_t*)aligned_alloc(2 * 1024 * 1024, alloc_size);
-    if (!temp_values) temp_values = (uint32_t*)aligned_alloc(64, alloc_size);
+    uint32_t *temp_keys = (uint32_t*)aligned_alloc(huge_page_size, alloc_size_huge);
+    if (!temp_keys) temp_keys = (uint32_t*)aligned_alloc(cache_line_size, alloc_size_aligned);
+    
+    uint32_t *temp_values = (uint32_t*)aligned_alloc(huge_page_size, alloc_size_huge);
+    if (!temp_values) temp_values = (uint32_t*)aligned_alloc(cache_line_size, alloc_size_aligned);
     
     if (!temp_keys || !temp_values) {
         fprintf(stderr, "Failed to allocate temp buffers\n");
@@ -88,8 +71,8 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
     }
     
     // Request transparent huge pages
-    madvise(temp_keys, alloc_size, MADV_HUGEPAGE);
-    madvise(temp_values, alloc_size, MADV_HUGEPAGE);
+    madvise(temp_keys, min_size, MADV_HUGEPAGE);
+    madvise(temp_values, min_size, MADV_HUGEPAGE);
     
     // Pre-touch temp buffers
     t_start = get_time_sec();
@@ -225,9 +208,9 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
             size_t my_offsets[RADIX_SIZE];
             memcpy(my_offsets, thread_offsets[tid], RADIX_SIZE * sizeof(size_t));
             
-            // Write-combining buffers for BOTH keys and values
-            uint32_t wc_keys[RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
-            uint32_t wc_vals[RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
+            // Write-combining buffers - INTERLEAVED key-value pairs for cache locality
+            // Each entry is {key, val} adjacent in memory (same cache line)
+            uint32_t wc_bufs[RADIX_SIZE][WC_BUFFER_SIZE * 2] __attribute__((aligned(64)));
             uint16_t wc_counts[RADIX_SIZE];
             memset(wc_counts, 0, RADIX_SIZE * sizeof(uint16_t));
             
@@ -274,21 +257,39 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
                 _mm512_storeu_si512((__m512i*)val_arr, vals_vec);
                 _mm512_storeu_si512((__m512i*)digit_arr, digits);
                 
-                // Flush macros for key-value pairs
+                // Flush macros for interleaved key-value pairs
+                // De-interleave and stream out to separate key/value arrays
                 #define FLUSH_KV_FULL(digit) do { \
-                    flush_key_buffer_aligned(wc_keys[digit], dst_keys + my_offsets[digit], WC_BUFFER_SIZE); \
-                    flush_val_buffer_aligned(wc_vals[digit], dst_vals + my_offsets[digit], WC_BUFFER_SIZE); \
+                    uint32_t *buf = wc_bufs[digit]; \
+                    uint32_t *out_k = dst_keys + my_offsets[digit]; \
+                    uint32_t *out_v = dst_vals + my_offsets[digit]; \
+                    /* De-interleave with SIMD: load 16 pairs, separate into 16 keys + 16 vals */ \
+                    for (int _b = 0; _b < WC_BUFFER_SIZE; _b += 16) { \
+                        /* Load 32 elements (16 key-val pairs) */ \
+                        __m512i kv0 = _mm512_load_si512((__m512i*)(buf + _b * 2)); \
+                        __m512i kv1 = _mm512_load_si512((__m512i*)(buf + _b * 2 + 16)); \
+                        /* Deinterleave: extract keys (even indices) and vals (odd indices) */ \
+                        /* kv0 = k0,v0,k1,v1,k2,v2,k3,v3,k4,v4,k5,v5,k6,v6,k7,v7 */ \
+                        /* kv1 = k8,v8,k9,v9,... */ \
+                        __m512i idx_k = _mm512_set_epi32(30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0); \
+                        __m512i idx_v = _mm512_set_epi32(31,29,27,25,23,21,19,17,15,13,11,9,7,5,3,1); \
+                        __m512i keys_out = _mm512_permutex2var_epi32(kv0, idx_k, kv1); \
+                        __m512i vals_out = _mm512_permutex2var_epi32(kv0, idx_v, kv1); \
+                        _mm512_stream_si512((__m512i*)(out_k + _b), keys_out); \
+                        _mm512_stream_si512((__m512i*)(out_v + _b), vals_out); \
+                    } \
                     my_offsets[digit] += WC_BUFFER_SIZE; \
                     wc_counts[digit] = 0; \
                 } while(0)
                 
                 #define FLUSH_KV_EARLY(digit) do { \
                     uint16_t cnt = wc_counts[digit]; \
+                    uint32_t *buf = wc_bufs[digit]; \
                     uint32_t *out_k = dst_keys + my_offsets[digit]; \
                     uint32_t *out_v = dst_vals + my_offsets[digit]; \
                     for (uint16_t _j = 0; _j < cnt; _j++) { \
-                        out_k[_j] = wc_keys[digit][_j]; \
-                        out_v[_j] = wc_vals[digit][_j]; \
+                        out_k[_j] = buf[_j * 2]; \
+                        out_v[_j] = buf[_j * 2 + 1]; \
                     } \
                     my_offsets[digit] += cnt; \
                     wc_counts[digit] = 0; \
@@ -296,11 +297,12 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
                     first_flush_threshold[digit] = WC_BUFFER_SIZE; \
                 } while(0)
                 
+                // Scatter to interleaved buffer - key and val are adjacent (same cache line!)
                 #define SCATTER_KV(idx) do { \
                     uint32_t d = digit_arr[idx]; \
                     uint16_t cnt = wc_counts[d]; \
-                    wc_keys[d][cnt] = key_arr[idx]; \
-                    wc_vals[d][cnt] = val_arr[idx]; \
+                    wc_bufs[d][cnt * 2] = key_arr[idx]; \
+                    wc_bufs[d][cnt * 2 + 1] = val_arr[idx]; \
                     wc_counts[d] = cnt + 1; \
                     if (wc_counts[d] == first_flush_threshold[d]) { \
                         if (bucket_aligned[d]) { \
@@ -326,8 +328,8 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
                 uint32_t digit = (key >> shift) & RADIX_MASK;
                 
                 uint16_t cnt = wc_counts[digit];
-                wc_keys[digit][cnt] = key;
-                wc_vals[digit][cnt] = val;
+                wc_bufs[digit][cnt * 2] = key;
+                wc_bufs[digit][cnt * 2 + 1] = val;
                 wc_counts[digit] = cnt + 1;
                 
                 if (wc_counts[digit] == first_flush_threshold[digit]) {
@@ -342,18 +344,38 @@ void sort_kv_array(uint32_t *keys, uint32_t *values, size_t size) {
             #undef FLUSH_KV_FULL
             #undef FLUSH_KV_EARLY
             
-            // Flush remaining elements
+            // Flush remaining elements from interleaved buffer
             for (int d = 0; d < RADIX_SIZE; d++) {
                 if (wc_counts[d] > 0) {
+                    uint32_t *buf = wc_bufs[d];
+                    uint32_t *out_k = dst_keys + my_offsets[d];
+                    uint32_t *out_v = dst_vals + my_offsets[d];
+                    int cnt = wc_counts[d];
+                    
                     if (bucket_aligned[d]) {
-                        flush_key_buffer_aligned(wc_keys[d], dst_keys + my_offsets[d], wc_counts[d]);
-                        flush_val_buffer_aligned(wc_vals[d], dst_vals + my_offsets[d], wc_counts[d]);
+                        // Can use SIMD for full cache lines
+                        int full_lines = cnt / 16;
+                        for (int line = 0; line < full_lines; line++) {
+                            int _b = line * 16;
+                            __m512i kv0 = _mm512_load_si512((__m512i*)(buf + _b * 2));
+                            __m512i kv1 = _mm512_load_si512((__m512i*)(buf + _b * 2 + 16));
+                            __m512i idx_k = _mm512_set_epi32(30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0);
+                            __m512i idx_v = _mm512_set_epi32(31,29,27,25,23,21,19,17,15,13,11,9,7,5,3,1);
+                            __m512i keys_out = _mm512_permutex2var_epi32(kv0, idx_k, kv1);
+                            __m512i vals_out = _mm512_permutex2var_epi32(kv0, idx_v, kv1);
+                            _mm512_stream_si512((__m512i*)(out_k + _b), keys_out);
+                            _mm512_stream_si512((__m512i*)(out_v + _b), vals_out);
+                        }
+                        // Scalar for tail
+                        for (int j = full_lines * 16; j < cnt; j++) {
+                            out_k[j] = buf[j * 2];
+                            out_v[j] = buf[j * 2 + 1];
+                        }
                     } else {
-                        uint32_t *out_k = dst_keys + my_offsets[d];
-                        uint32_t *out_v = dst_vals + my_offsets[d];
-                        for (int j = 0; j < wc_counts[d]; j++) {
-                            out_k[j] = wc_keys[d][j];
-                            out_v[j] = wc_vals[d][j];
+                        // Scalar path for unaligned
+                        for (int j = 0; j < cnt; j++) {
+                            out_k[j] = buf[j * 2];
+                            out_v[j] = buf[j * 2 + 1];
                         }
                     }
                 }

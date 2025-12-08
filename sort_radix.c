@@ -67,12 +67,19 @@ void sort_array(uint32_t *arr, size_t size) {
     double t_start, t_end;
     
     // Allocate output buffer with huge page support
-    // Align to 2MB boundary for huge pages
-    size_t alloc_size = size * sizeof(uint32_t);
-    uint32_t *temp = (uint32_t*)aligned_alloc(2 * 1024 * 1024, alloc_size);  // 2MB alignment
+    // Note: aligned_alloc requires size to be a multiple of alignment
+    size_t min_size = size * sizeof(uint32_t);
+    size_t huge_page_size = 2 * 1024 * 1024;
+    size_t cache_line_size = 64;
+    
+    // Round up to alignment boundary
+    size_t alloc_size_huge = ((min_size + huge_page_size - 1) / huge_page_size) * huge_page_size;
+    size_t alloc_size_aligned = ((min_size + cache_line_size - 1) / cache_line_size) * cache_line_size;
+    
+    uint32_t *temp = (uint32_t*)aligned_alloc(huge_page_size, alloc_size_huge);
     if (!temp) {
         // Fall back to 64-byte alignment if 2MB fails
-        temp = (uint32_t*)aligned_alloc(64, alloc_size);
+        temp = (uint32_t*)aligned_alloc(cache_line_size, alloc_size_aligned);
     }
     if (!temp) {
         fprintf(stderr, "Failed to allocate temp buffer\n");
@@ -81,7 +88,7 @@ void sort_array(uint32_t *arr, size_t size) {
     
     // Request transparent huge pages for the temp buffer
     // This can dramatically reduce TLB misses (2MB pages vs 4KB pages)
-    if (madvise(temp, alloc_size, MADV_HUGEPAGE) != 0) {
+    if (madvise(temp, min_size, MADV_HUGEPAGE) != 0) {
         // Not fatal - will use regular pages
         // perror("madvise MADV_HUGEPAGE (temp)");
     }
