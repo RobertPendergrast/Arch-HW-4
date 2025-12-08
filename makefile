@@ -38,8 +38,17 @@ improved_split: improved_split.c utils.o
 multi_sort: multi_sort.c utils.o
 	$(CC) $(CFLAGS_OPT) multi_sort.c utils.o -o multi_sort $(LDFLAGS)
 
+stable_sort_avx512.o: stable_sort_avx512.c stable_sort_avx512.h
+	$(CC) $(CFLAGS) -c stable_sort_avx512.c -o stable_sort_avx512.o
+
+test_stable_sort: test_stable_sort.c stable_sort_avx512.o
+	$(CC) $(CFLAGS) test_stable_sort.c stable_sort_avx512.o -o test_stable_sort $(LDFLAGS)
+
+test_stable_sort_run: test_stable_sort
+	./test_stable_sort
+
 clean:
-	rm -f utils.o merge.o sorting merge threaded_devide improved_split multi_sort
+	rm -f utils.o merge.o stable_sort_avx512.o sorting merge threaded_devide improved_split multi_sort test_stable_sort sort_simd sort_fast_stable test_merge test_sort_network
 
 github:
 	-git commit -a
