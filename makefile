@@ -53,6 +53,9 @@ bench_stable_sort: bench_stable_sort.c stable_sort_avx512.o utils.o
 sort_scaler_comparison: sort_scaler_comparison.c utils.o merge.o
 	$(CC) $(CFLAGS) -fopenmp sort_scaler_comparison.c utils.o merge.o -o sort_scaler_comparison $(LDFLAGS)
 
+sort_radix: sort_radix.c utils.o
+	$(CC) $(CFLAGS) -fopenmp sort_radix.c utils.o -o sort_radix $(LDFLAGS)
+
 clean:
 	rm -f utils.o merge.o stable_sort_avx512.o sorting merge threaded_devide improved_split multi_sort test_stable_sort sort_simd sort_fast_stable test_merge test_sort_network bench_stable_sort
 
