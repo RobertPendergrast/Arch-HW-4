@@ -447,9 +447,9 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
         if (num_pairs > 1) {
-            // MULTIPLE PAIRS: Use parallel for
-            // Even with some idle threads, this is simpler and often faster
-            // because merges can run truly concurrently on different cache lines
+            // MULTIPLE PAIRS: Use parallel for - each thread handles one or more merges
+            // This is better than parallel merge because merge is memory-bound
+            // and multiple independent merges can saturate memory bandwidth better
             #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
@@ -468,7 +468,7 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 }
             }
         } else {
-            // SINGLE PAIR: Use parallel merge - all threads work on one merge
+            // SINGLE PAIR: Use parallel merge - only case where it helps
             size_t left_size = (width <= chunk_size) ? width : chunk_size;
             size_t right_start = left_size;
             
