@@ -1,0 +1,5 @@
+distribution,algorithm,algorithm_name,time_seconds,status
+uniform,sorting,Base,178.430,OK
+uniform,improved_split,Cache-Optimized,162.891,OK
+uniform,multi_sort,Multithreaded,22.286,OK
+uniform,sort_simd,SIMD,3.527,OK

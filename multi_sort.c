@@ -204,15 +204,19 @@ void sort_array(uint32_t *arr, size_t n, int num_threads) {
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Usage: %s <input_file> <num_threads>\n", argv[0]);
-        printf("  num_threads: 1, 2, 4, 8, or 16\n");
+        printf("Usage: %s <input_file> <output_file> [num_threads]\n", argv[0]);
+        printf("  num_threads: 1, 2, 4, 8, or 16 (default: %d)\n", MAX_THREADS);
         return 1;
     }
 
-    int num_threads = atoi(argv[2]);
-    if (num_threads < 1 || num_threads > MAX_THREADS) {
-        printf("Error: num_threads must be between 1 and %d\n", MAX_THREADS);
-        return 1;
+    // Default to max threads, but allow override via optional 3rd argument
+    int num_threads = MAX_THREADS;
+    if (argc >= 4) {
+        num_threads = atoi(argv[3]);
+        if (num_threads < 1 || num_threads > MAX_THREADS) {
+            printf("Error: num_threads must be between 1 and %d\n", MAX_THREADS);
+            return 1;
+        }
     }
 
     uint64_t size;
@@ -222,12 +226,25 @@ int main(int argc, char *argv[]) {
     printf("Read %lu elements from %s\n", size, argv[1]);
     printf("Using %d threads\n\n", num_threads);
     
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    
     sort_array(arr, size, num_threads);
+    
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    printf("Sorting took %.3f seconds\n", elapsed);
 
     if (verify_sortedness(arr, size)) {
         printf("Array sorted successfully!\n");
     } else {
         printf("ERROR: Array not sorted!\n");
+        free(arr);
+        return 1;
+    }
+
+    // Write sorted array to output file
+    if (write_array_to_file(argv[2], arr, size) != 0) {
         free(arr);
         return 1;
     }
