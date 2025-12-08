@@ -391,9 +391,9 @@ static void parallel_merge_impl_kv(
                            right_key, right_pay, right_size,
                            out_key, out_pay);
         } else {
-            // DIFFERENCE: No unaligned KV merge, use scalar fallback
-            merge_local_kv_inline(left_key, left_pay, right_key, right_pay,
-                                  out_key, out_pay, left_size, right_size);
+            merge_arrays_unaligned_kv(left_key, left_pay, left_size,
+                                      right_key, right_pay, right_size,
+                                      out_key, out_pay);
         }
         return;
     }

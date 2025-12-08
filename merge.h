@@ -93,4 +93,16 @@ void merge_arrays_cached_kv(
     uint32_t *arr_payload
 );
 
+// Unaligned KV version: accepts unaligned inputs for parallel merge splitting
+void merge_arrays_unaligned_kv(
+    uint32_t *left_key,
+    uint32_t *left_payload,
+    size_t size_left,
+    uint32_t *right_key,
+    uint32_t *right_payload,
+    size_t size_right,
+    uint32_t *arr_key,
+    uint32_t *arr_payload
+);
+
 #endif

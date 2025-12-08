@@ -890,3 +890,172 @@ void merge_arrays_kv(
         }
     }
 }
+
+// Unaligned-input KV version for parallel merge (inputs may be at arbitrary offsets)
+// Uses alignment preamble: write a few elements with regular stores to reach
+// 64-byte alignment, then use streaming stores for the rest.
+void merge_arrays_unaligned_kv(
+    uint32_t *left_key,
+    uint32_t *left_payload,
+    size_t size_left,
+    uint32_t *right_key,
+    uint32_t *right_payload,
+    size_t size_right,
+    uint32_t *arr_key,
+    uint32_t *arr_payload
+) {
+    // Small arrays: fall back to scalar merge
+    if (size_left < 16 || size_right < 16) {
+        merge_local_kv(left_key, left_payload, right_key, right_payload,
+                       arr_key, arr_payload, size_left, size_right);
+        return;
+    }
+
+    size_t left_idx = 0;
+    size_t right_idx = 0;
+    size_t out_idx = 0;
+    
+    // ===== ALIGNMENT PREAMBLE =====
+    // Calculate how many elements until next 64-byte boundary
+    size_t misalign_bytes = (uintptr_t)arr_key % 64;
+    size_t preamble_count = 0;
+    if (misalign_bytes != 0) {
+        preamble_count = (64 - misalign_bytes) / sizeof(uint32_t);
+        
+        // Scalar merge for preamble
+        while (out_idx < preamble_count && left_idx < size_left && right_idx < size_right) {
+            if (left_key[left_idx] <= right_key[right_idx]) {
+                arr_key[out_idx] = left_key[left_idx];
+                arr_payload[out_idx] = left_payload[left_idx];
+                left_idx++;
+            } else {
+                arr_key[out_idx] = right_key[right_idx];
+                arr_payload[out_idx] = right_payload[right_idx];
+                right_idx++;
+            }
+            out_idx++;
+        }
+        // Handle case where one side exhausted during preamble
+        while (out_idx < preamble_count && left_idx < size_left) {
+            arr_key[out_idx] = left_key[left_idx];
+            arr_payload[out_idx] = left_payload[left_idx];
+            left_idx++;
+            out_idx++;
+        }
+        while (out_idx < preamble_count && right_idx < size_right) {
+            arr_key[out_idx] = right_key[right_idx];
+            arr_payload[out_idx] = right_payload[right_idx];
+            right_idx++;
+            out_idx++;
+        }
+    }
+    
+    // Now arr_key + out_idx is 64-byte aligned!
+    // Check if we have enough elements left for SIMD
+    size_t left_remaining = size_left - left_idx;
+    size_t right_remaining = size_right - right_idx;
+    
+    if (left_remaining < 16 || right_remaining < 16) {
+        // Not enough for SIMD, finish with scalar
+        merge_local_kv(left_key + left_idx, left_payload + left_idx,
+                       right_key + right_idx, right_payload + right_idx,
+                       arr_key + out_idx, arr_payload + out_idx,
+                       left_remaining, right_remaining);
+        return;
+    }
+    
+    // ===== ALIGNED SIMD MERGE WITH STREAMING STORES =====
+    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
+
+    // UNALIGNED loads from left and right (inputs may be at arbitrary offsets)
+    __m512i left_key_reg = _mm512_loadu_epi32(left_key + left_idx);
+    __m512i right_key_reg = _mm512_loadu_epi32(right_key + right_idx);
+    __m512i left_pay_reg = _mm512_loadu_epi32(left_payload + left_idx);
+    __m512i right_pay_reg = _mm512_loadu_epi32(right_payload + right_idx);
+    
+    merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                        idx_rev, idx_swap8, idx_swap4);
+    
+    // Output is now aligned - use streaming store!
+    _mm512_stream_si512((__m512i*)(arr_key + out_idx), left_key_reg);
+    _mm512_stream_si512((__m512i*)(arr_payload + out_idx), left_pay_reg);
+    
+    left_idx += 16;
+    right_idx += 16;
+    out_idx += 16;
+    
+    // Main SIMD loop - output stays aligned since we write 64 bytes at a time
+    while (left_idx + 16 <= size_left && right_idx + 16 <= size_right) {
+        _mm_prefetch((const char*)(left_key + left_idx + 64), _MM_HINT_T0);
+        _mm_prefetch((const char*)(right_key + right_idx + 64), _MM_HINT_T0);
+        _mm_prefetch((const char*)(left_payload + left_idx + 64), _MM_HINT_T0);
+        _mm_prefetch((const char*)(right_payload + right_idx + 64), _MM_HINT_T0);
+        
+        // UNALIGNED loads (inputs may not be aligned)
+        __m512i next_left_key = _mm512_loadu_epi32(left_key + left_idx);
+        __m512i next_right_key = _mm512_loadu_epi32(right_key + right_idx);
+        __m512i next_left_pay = _mm512_loadu_epi32(left_payload + left_idx);
+        __m512i next_right_pay = _mm512_loadu_epi32(right_payload + right_idx);
+        
+        unsigned int take_left = left_key[left_idx] <= right_key[right_idx];
+        __mmask16 mask = take_left ? 0xFFFF : 0x0000;
+        left_key_reg = _mm512_mask_blend_epi32(mask, next_right_key, next_left_key);
+        left_pay_reg = _mm512_mask_blend_epi32(mask, next_right_pay, next_left_pay);
+        
+        left_idx += take_left * 16;
+        right_idx += (!take_left) * 16;
+        
+        merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                            idx_rev, idx_swap8, idx_swap4);
+        
+        // STREAMING STORE - output is aligned!
+        _mm512_stream_si512((__m512i*)(arr_key + out_idx), left_key_reg);
+        _mm512_stream_si512((__m512i*)(arr_payload + out_idx), left_pay_reg);
+        out_idx += 16;
+    }
+    
+    // Memory fence for streaming stores
+    _mm_sfence();
+    
+    // ===== HANDLE REMAINDERS =====
+    left_remaining = size_left - left_idx;
+    right_remaining = size_right - right_idx;
+    
+    uint32_t pending_key[16];
+    uint32_t pending_pay[16];
+    _mm512_storeu_epi32(pending_key, right_key_reg);
+    _mm512_storeu_epi32(pending_pay, right_pay_reg);
+    
+    size_t remainder_size = left_remaining + right_remaining;
+    
+    if (remainder_size == 0) {
+        _mm512_stream_si512((__m512i*)(arr_key + out_idx), right_key_reg);
+        _mm512_stream_si512((__m512i*)(arr_payload + out_idx), right_pay_reg);
+        _mm_sfence();
+    } else {
+        uint32_t remainder_key[32];
+        uint32_t remainder_pay[32];
+        
+        if (left_remaining < right_remaining) {
+            merge_local_kv(left_key + left_idx, left_payload + left_idx,
+                           pending_key, pending_pay,
+                           remainder_key, remainder_pay,
+                           left_remaining, 16);
+            merge_local_kv(remainder_key, remainder_pay,
+                           right_key + right_idx, right_payload + right_idx,
+                           arr_key + out_idx, arr_payload + out_idx,
+                           left_remaining + 16, right_remaining);
+        } else {
+            merge_local_kv(right_key + right_idx, right_payload + right_idx,
+                           pending_key, pending_pay,
+                           remainder_key, remainder_pay,
+                           right_remaining, 16);
+            merge_local_kv(remainder_key, remainder_pay,
+                           left_key + left_idx, left_payload + left_idx,
+                           arr_key + out_idx, arr_payload + out_idx,
+                           right_remaining + 16, left_remaining);
+        }
+    }
+}
