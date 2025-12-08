@@ -94,9 +94,16 @@ void sort_array(uint32_t *arr, size_t size) {
             
             // SIMD histogram: process 16 elements at a time
             size_t i = start;
+            
+            // Prefetch first few cache lines
+            for (int p = 0; p < 8; p++) {
+                _mm_prefetch((const char*)(src + start + p * 16), _MM_HINT_T0);
+            }
+            
             for (; i + 16 <= end; i += 16) {
-                // Prefetch ahead
-                _mm_prefetch((const char*)(src + i + 128), _MM_HINT_T0);
+                // Prefetch further ahead (512 bytes = 8 cache lines ahead)
+                _mm_prefetch((const char*)(src + i + 256), _MM_HINT_T0);
+                _mm_prefetch((const char*)(src + i + 320), _MM_HINT_T0);
                 
                 // Load 16 elements with SIMD
                 __m512i vals = _mm512_loadu_si512((__m512i*)(src + i));
@@ -188,9 +195,16 @@ void sort_array(uint32_t *arr, size_t size) {
             // Scatter with SIMD loading + write-combining
             size_t i = start;
             
+            // Prefetch first cache lines
+            for (int p = 0; p < 8; p++) {
+                _mm_prefetch((const char*)(src + start + p * 16), _MM_HINT_T0);
+            }
+            
             // Process 16 elements at a time with SIMD
             for (; i + 16 <= end; i += 16) {
-                _mm_prefetch((const char*)(src + i + 128), _MM_HINT_T0);
+                // Prefetch further ahead
+                _mm_prefetch((const char*)(src + i + 256), _MM_HINT_T0);
+                _mm_prefetch((const char*)(src + i + 320), _MM_HINT_T0);
                 
                 // SIMD load 16 values and extract digits
                 __m512i vals = _mm512_loadu_si512((__m512i*)(src + i));
@@ -203,9 +217,13 @@ void sort_array(uint32_t *arr, size_t size) {
                 
                 // Scatter each element to its bucket (unrolled)
                 #define FLUSH_BUFFER(digit) do { \
-                    /* Flush 16 cache lines (1KB) with SIMD - unrolled for speed */ \
+                    /* Flush 16 cache lines (1KB) with SIMD + streaming stores */ \
                     uint32_t *buf = wc_buffers[digit]; \
                     uint32_t *out = dst + my_offsets[digit]; \
+                    /* Prefetch output destination */ \
+                    for (int _p = 0; _p < WC_BUFFER_SIZE; _p += 64) { \
+                        _mm_prefetch((const char*)(out + _p), _MM_HINT_T0); \
+                    } \
                     for (int _c = 0; _c < WC_BUFFER_SIZE; _c += 64) { \
                         __m512i v0 = _mm512_load_si512((__m512i*)(buf + _c + 0)); \
                         __m512i v1 = _mm512_load_si512((__m512i*)(buf + _c + 16)); \
