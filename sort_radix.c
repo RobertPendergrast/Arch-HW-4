@@ -8,14 +8,17 @@
 #include "utils.h"
 
 #define NUM_THREADS 16
-#define RADIX_BITS 8
-#define RADIX_SIZE (1 << RADIX_BITS)  // 256 buckets
-#define RADIX_MASK (RADIX_SIZE - 1)
+
+// 11-bit radix: 3 passes (11 + 11 + 10 = 32 bits)
+#define NUM_PASSES 3
+static const int PASS_BITS[NUM_PASSES] = {11, 11, 10};  // bits per pass
+static const int PASS_SHIFT[NUM_PASSES] = {0, 11, 22};  // shift amount
+#define MAX_RADIX_SIZE 2048  // 2^11
 
 // Software Write-Combining buffer size
-// Larger buffers = fewer flushes, better write coalescing
-// 256 elements = 1KB = 16 cache lines
-#define WC_BUFFER_SIZE 256
+// Smaller buffers needed for 2048 buckets to fit in cache
+// 32 elements * 2048 buckets * 4 bytes = 256KB per thread
+#define WC_BUFFER_SIZE 32
 
 // Helper for timing
 static inline double get_time_sec(void) {
@@ -25,7 +28,7 @@ static inline double get_time_sec(void) {
 }
 
 // ============== LSD Radix Sort (Stable) ==============
-// Processes 8 bits at a time, 4 passes for 32-bit integers
+// Processes 11/11/10 bits per pass (3 passes for 32-bit integers)
 // Each pass is stable, so overall sort is stable
 
 void sort_array(uint32_t *arr, size_t size) {
@@ -52,32 +55,35 @@ void sort_array(uint32_t *arr, size_t size) {
     printf("Buffer warmup: %.3f sec\n", t_end - t_start);
     
     // Per-thread histograms to avoid false sharing
-    // [thread][digit] layout
-    size_t (*local_hist)[RADIX_SIZE] = aligned_alloc(64, NUM_THREADS * sizeof(*local_hist));
+    // [thread][digit] layout - sized for max radix
+    size_t (*local_hist)[MAX_RADIX_SIZE] = aligned_alloc(64, NUM_THREADS * sizeof(*local_hist));
     
     // Global histogram and prefix sums
-    size_t global_hist[RADIX_SIZE];
-    size_t global_prefix[RADIX_SIZE];
+    size_t global_hist[MAX_RADIX_SIZE];
+    size_t global_prefix[MAX_RADIX_SIZE];
     
     // Per-thread offsets for scatter phase
-    size_t (*thread_offsets)[RADIX_SIZE] = aligned_alloc(64, NUM_THREADS * sizeof(*thread_offsets));
+    size_t (*thread_offsets)[MAX_RADIX_SIZE] = aligned_alloc(64, NUM_THREADS * sizeof(*thread_offsets));
     
     uint32_t *src = arr;
     uint32_t *dst = temp;
     
-    // Process each byte (4 passes for 32-bit integers)
-    for (int pass = 0; pass < 4; pass++) {
+    // Process 3 passes (11 + 11 + 10 bits)
+    for (int pass = 0; pass < NUM_PASSES; pass++) {
         double t_pass_start = get_time_sec();
         double t_hist_start, t_hist_end;
         double t_prefix_start, t_prefix_end;
         double t_scatter_start, t_scatter_end;
         
-        int shift = pass * RADIX_BITS;
+        int shift = PASS_SHIFT[pass];
+        int bits = PASS_BITS[pass];
+        int radix_size = 1 << bits;
+        int radix_mask = radix_size - 1;
         
         // ===== Phase 1: Build local histograms in parallel (SIMD) =====
         t_hist_start = get_time_sec();
         __m512i shift_vec = _mm512_set1_epi32(shift);
-        __m512i mask_vec = _mm512_set1_epi32(RADIX_MASK);
+        __m512i mask_vec = _mm512_set1_epi32(radix_mask);
         
         #pragma omp parallel
         {
@@ -85,7 +91,7 @@ void sort_array(uint32_t *arr, size_t size) {
             int nthreads = omp_get_num_threads();
             
             // Clear local histogram
-            memset(local_hist[tid], 0, RADIX_SIZE * sizeof(size_t));
+            memset(local_hist[tid], 0, radix_size * sizeof(size_t));
             
             // Each thread processes its static chunk
             size_t chunk_size = (size + nthreads - 1) / nthreads;
@@ -136,7 +142,7 @@ void sort_array(uint32_t *arr, size_t size) {
             }
             // Handle remainder
             for (; i < end; i++) {
-                uint32_t digit = (src[i] >> shift) & RADIX_MASK;
+                uint32_t digit = (src[i] >> shift) & radix_mask;
                 local_hist[tid][digit]++;
             }
         }
@@ -145,22 +151,22 @@ void sort_array(uint32_t *arr, size_t size) {
         // ===== Phase 2: Compute global histogram and prefix sum =====
         t_prefix_start = get_time_sec();
         // Sum all local histograms
-        memset(global_hist, 0, RADIX_SIZE * sizeof(size_t));
+        memset(global_hist, 0, radix_size * sizeof(size_t));
         for (int t = 0; t < NUM_THREADS; t++) {
-            for (int d = 0; d < RADIX_SIZE; d++) {
+            for (int d = 0; d < radix_size; d++) {
                 global_hist[d] += local_hist[t][d];
             }
         }
         
         // Compute prefix sum (exclusive)
         global_prefix[0] = 0;
-        for (int d = 1; d < RADIX_SIZE; d++) {
+        for (int d = 1; d < radix_size; d++) {
             global_prefix[d] = global_prefix[d-1] + global_hist[d-1];
         }
         
         // ===== Phase 3: Compute per-thread offsets for stable scatter =====
         // For each digit, thread t's elements go after threads 0..t-1's elements
-        for (int d = 0; d < RADIX_SIZE; d++) {
+        for (int d = 0; d < radix_size; d++) {
             size_t offset = global_prefix[d];
             for (int t = 0; t < NUM_THREADS; t++) {
                 thread_offsets[t][d] = offset;
@@ -183,14 +189,15 @@ void sort_array(uint32_t *arr, size_t size) {
             size_t end = (start + chunk_size < size) ? start + chunk_size : size;
             
             // Local copy of offsets (will be modified)
-            size_t my_offsets[RADIX_SIZE];
-            memcpy(my_offsets, thread_offsets[tid], RADIX_SIZE * sizeof(size_t));
+            size_t my_offsets[MAX_RADIX_SIZE];
+            memcpy(my_offsets, thread_offsets[tid], radix_size * sizeof(size_t));
             
             // Software write-combining buffers (one per bucket)
             // Aligned to cache line for efficient flushing
-            uint32_t wc_buffers[RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
-            uint16_t wc_counts[RADIX_SIZE];  // uint16_t for larger buffer sizes
-            memset(wc_counts, 0, RADIX_SIZE * sizeof(uint16_t));
+            // For 2048 buckets: 2048 * 32 * 4 = 256KB per thread
+            uint32_t wc_buffers[MAX_RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
+            uint8_t wc_counts[MAX_RADIX_SIZE];  // uint8_t sufficient for 32-element buffers
+            memset(wc_counts, 0, radix_size * sizeof(uint8_t));
             
             // Scatter with SIMD loading + write-combining
             size_t i = start;
@@ -217,23 +224,13 @@ void sort_array(uint32_t *arr, size_t size) {
                 
                 // Scatter each element to its bucket (unrolled)
                 #define FLUSH_BUFFER(digit) do { \
-                    /* Flush 16 cache lines (1KB) with SIMD + streaming stores */ \
+                    /* Flush 2 cache lines (128 bytes = 32 elements) with SIMD */ \
                     uint32_t *buf = wc_buffers[digit]; \
                     uint32_t *out = dst + my_offsets[digit]; \
-                    /* Prefetch output destination */ \
-                    for (int _p = 0; _p < WC_BUFFER_SIZE; _p += 64) { \
-                        _mm_prefetch((const char*)(out + _p), _MM_HINT_T0); \
-                    } \
-                    for (int _c = 0; _c < WC_BUFFER_SIZE; _c += 64) { \
-                        __m512i v0 = _mm512_load_si512((__m512i*)(buf + _c + 0)); \
-                        __m512i v1 = _mm512_load_si512((__m512i*)(buf + _c + 16)); \
-                        __m512i v2 = _mm512_load_si512((__m512i*)(buf + _c + 32)); \
-                        __m512i v3 = _mm512_load_si512((__m512i*)(buf + _c + 48)); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 0), v0); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 16), v1); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 32), v2); \
-                        _mm512_storeu_si512((__m512i*)(out + _c + 48), v3); \
-                    } \
+                    __m512i v0 = _mm512_load_si512((__m512i*)(buf + 0)); \
+                    __m512i v1 = _mm512_load_si512((__m512i*)(buf + 16)); \
+                    _mm512_storeu_si512((__m512i*)(out + 0), v0); \
+                    _mm512_storeu_si512((__m512i*)(out + 16), v1); \
                     my_offsets[digit] += WC_BUFFER_SIZE; \
                     wc_counts[digit] = 0; \
                 } while(0)
@@ -257,7 +254,7 @@ void sort_array(uint32_t *arr, size_t size) {
             // Handle remainder
             for (; i < end; i++) {
                 uint32_t val = src[i];
-                uint32_t digit = (val >> shift) & RADIX_MASK;
+                uint32_t digit = (val >> shift) & radix_mask;
                 
                 wc_buffers[digit][wc_counts[digit]++] = val;
                 
@@ -269,7 +266,7 @@ void sort_array(uint32_t *arr, size_t size) {
             #undef FLUSH_BUFFER
             
             // Flush remaining elements in buffers (use SIMD for full cache lines)
-            for (int d = 0; d < RADIX_SIZE; d++) {
+            for (int d = 0; d < radix_size; d++) {
                 if (wc_counts[d] > 0) {
                     uint32_t *buf = wc_buffers[d];
                     uint32_t *out = dst + my_offsets[d];
@@ -297,7 +294,7 @@ void sort_array(uint32_t *arr, size_t size) {
         
         double throughput = (size * sizeof(uint32_t) * 2) / t_pass_total / 1e9;
         printf("Pass %d (bits %2d-%2d): %.3f sec (%.1f GB/s)  [hist: %.3fs, prefix: %.4fs, scatter: %.3fs]\n", 
-               pass, shift, shift + RADIX_BITS - 1, t_pass_total, throughput,
+               pass, shift, shift + bits - 1, t_pass_total, throughput,
                t_hist, t_prefix, t_scatter);
         
         // Swap buffers
