@@ -633,8 +633,10 @@ static void sort_chunk_parallel_64(uint64_t *arr, size_t chunk_size, uint64_t *t
     for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
-        if (num_pairs >= (size_t)NUM_THREADS) {
-            // MANY PAIRS: Use parallel for (one merge per thread)
+        if (num_pairs > 1) {
+            // MULTIPLE PAIRS: Use parallel for
+            // Even with some idle threads, this is simpler and often faster
+            // because merges can run truly concurrently on different cache lines
             #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
@@ -653,35 +655,15 @@ static void sort_chunk_parallel_64(uint64_t *arr, size_t chunk_size, uint64_t *t
                 }
             }
         } else {
-            // FEW PAIRS: Use parallel merge within each pair
-            // Calculate depth based on threads available per pair
-            int depth = 0;
-            size_t threads_per_pair = (NUM_THREADS + num_pairs - 1) / num_pairs;
-            for (size_t t = threads_per_pair; t > 1; t /= 2) depth++;
+            // SINGLE PAIR: Use parallel merge - all threads work on one merge
+            size_t left_size = (width <= chunk_size) ? width : chunk_size;
+            size_t right_start = left_size;
             
-            #pragma omp parallel
-            {
-                #pragma omp single
-                {
-                    for (size_t p = 0; p < num_pairs; p++) {
-                        size_t left_start = p * 2 * width;
-                        if (left_start >= chunk_size) continue;
-                        
-                        size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
-                        size_t right_start = left_start + left_size;
-                        
-                        if (right_start >= chunk_size) {
-                            #pragma omp task
-                            memcpy(dst + left_start, src + left_start, left_size * sizeof(uint64_t));
-                        } else {
-                            size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-                            #pragma omp task
-                            parallel_merge_impl_64(src + left_start, left_size,
-                                                   src + right_start, right_size,
-                                                   dst + left_start, depth);
-                        }
-                    }
-                }
+            if (right_start < chunk_size) {
+                size_t right_size = chunk_size - right_start;
+                parallel_merge_64(src, left_size, src + right_start, right_size, dst);
+            } else {
+                memcpy(dst, src, chunk_size * sizeof(uint64_t));
             }
         }
         
@@ -748,8 +730,8 @@ void stable_merge_sort(uint32_t *arr, size_t size) {
             t_start = get_time_sec();
             size_t num_pairs = (size + 2 * width - 1) / (2 * width);
             
-            if (num_pairs >= (size_t)NUM_THREADS) {
-                // MANY PAIRS: Use parallel for (one merge per thread)
+            if (num_pairs > 1) {
+                // MULTIPLE PAIRS: Parallel for - better for memory-bound work
                 #pragma omp parallel for schedule(dynamic, 1)
                 for (size_t p = 0; p < num_pairs; p++) {
                     size_t left_start = p * 2 * width;
@@ -772,46 +754,25 @@ void stable_merge_sort(uint32_t *arr, size_t size) {
                 printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu merges, %.2f GB/s)\n",
                        width, t_end - t_start, num_pairs, throughput);
             } else {
-                // FEW PAIRS: Use parallel merge within each pair
-                // Calculate depth based on threads available per pair
-                int depth = 0;
-                size_t threads_per_pair = (NUM_THREADS + num_pairs - 1) / num_pairs;
-                for (size_t t = threads_per_pair; t > 1; t /= 2) depth++;
-                depth += 1;  // Extra depth for better load balancing
+                // SINGLE PAIR: Use parallel merge - only case where it helps
+                size_t left_size = (width <= size) ? width : size;
+                size_t right_start = left_size;
                 
-                #pragma omp parallel
-                {
-                    #pragma omp single
-                    {
-                        for (size_t p = 0; p < num_pairs; p++) {
-                            size_t left_start = p * 2 * width;
-                            if (left_start >= size) continue;
-                            
-                            size_t left_size = (left_start + width <= size) ? width : (size - left_start);
-                            size_t right_start = left_start + left_size;
-                            
-                            if (right_start >= size) {
-                                #pragma omp task
-                                {
-                                    for (size_t i = 0; i < left_size; i += 4096) {
-                                        size_t copy_size = (i + 4096 <= left_size) ? 4096 : (left_size - i);
-                                        memcpy(dst + left_start + i, src + left_start + i, copy_size * sizeof(uint64_t));
-                                    }
-                                }
-                            } else {
-                                size_t right_size = (right_start + width <= size) ? width : (size - right_start);
-                                #pragma omp task
-                                parallel_merge_impl_64(src + left_start, left_size,
-                                                       src + right_start, right_size,
-                                                       dst + left_start, depth);
-                            }
-                        }
+                if (right_start < size) {
+                    size_t right_size = size - right_start;
+                    parallel_merge_64(src, left_size, src + right_start, right_size, dst);
+                } else {
+                    // Just copy
+                    #pragma omp parallel for schedule(static)
+                    for (size_t i = 0; i < size; i += 4096) {
+                        size_t copy_size = (i + 4096 <= size) ? 4096 : (size - i);
+                        memcpy(dst + i, src + i, copy_size * sizeof(uint64_t));
                     }
                 }
                 t_end = get_time_sec();
                 double throughput = (size * sizeof(uint64_t)) / (t_end - t_start) / 1e9;
-                printf("  [Phase 2] Merge width %10zu: %.3f sec (%zu PARALLEL merges, %.2f GB/s)\n",
-                       width, t_end - t_start, num_pairs, throughput);
+                printf("  [Phase 2] Merge width %10zu: %.3f sec (PARALLEL merge, %.2f GB/s)\n",
+                       width, t_end - t_start, throughput);
             }
             
             uint64_t *swap = src;
