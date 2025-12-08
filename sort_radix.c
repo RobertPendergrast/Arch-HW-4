@@ -12,8 +12,10 @@
 #define RADIX_SIZE (1 << RADIX_BITS)  // 256 buckets
 #define RADIX_MASK (RADIX_SIZE - 1)
 
-// Software Write-Combining buffer size (one cache line = 16 uint32_t)
-#define WC_BUFFER_SIZE 16
+// Software Write-Combining buffer size
+// Larger buffers = fewer flushes, but more memory for buffers
+// 64 elements = 256 bytes = 4 cache lines
+#define WC_BUFFER_SIZE 64
 
 // Helper for timing
 static inline double get_time_sec(void) {
@@ -171,8 +173,8 @@ void sort_array(uint32_t *arr, size_t size) {
             // Software write-combining buffers (one per bucket)
             // Aligned to cache line for efficient flushing
             uint32_t wc_buffers[RADIX_SIZE][WC_BUFFER_SIZE] __attribute__((aligned(64)));
-            uint8_t wc_counts[RADIX_SIZE];
-            memset(wc_counts, 0, RADIX_SIZE);
+            uint16_t wc_counts[RADIX_SIZE];  // uint16_t for larger buffer sizes
+            memset(wc_counts, 0, RADIX_SIZE * sizeof(uint16_t));
             
             // Scatter with SIMD loading + write-combining
             size_t i = start;
@@ -195,8 +197,15 @@ void sort_array(uint32_t *arr, size_t size) {
                     uint32_t d = digit_arr[idx]; \
                     wc_buffers[d][wc_counts[d]++] = val_arr[idx]; \
                     if (wc_counts[d] == WC_BUFFER_SIZE) { \
-                        __m512i vec = _mm512_loadu_si512((__m512i*)wc_buffers[d]); \
-                        _mm512_storeu_si512((__m512i*)(dst + my_offsets[d]), vec); \
+                        /* Flush 4 cache lines (64 elements = 256 bytes) */ \
+                        __m512i v0 = _mm512_loadu_si512((__m512i*)(wc_buffers[d] + 0)); \
+                        __m512i v1 = _mm512_loadu_si512((__m512i*)(wc_buffers[d] + 16)); \
+                        __m512i v2 = _mm512_loadu_si512((__m512i*)(wc_buffers[d] + 32)); \
+                        __m512i v3 = _mm512_loadu_si512((__m512i*)(wc_buffers[d] + 48)); \
+                        _mm512_storeu_si512((__m512i*)(dst + my_offsets[d] + 0), v0); \
+                        _mm512_storeu_si512((__m512i*)(dst + my_offsets[d] + 16), v1); \
+                        _mm512_storeu_si512((__m512i*)(dst + my_offsets[d] + 32), v2); \
+                        _mm512_storeu_si512((__m512i*)(dst + my_offsets[d] + 48), v3); \
                         my_offsets[d] += WC_BUFFER_SIZE; \
                         wc_counts[d] = 0; \
                     } \
@@ -218,8 +227,15 @@ void sort_array(uint32_t *arr, size_t size) {
                 wc_buffers[digit][wc_counts[digit]++] = val;
                 
                 if (wc_counts[digit] == WC_BUFFER_SIZE) {
-                    __m512i vec = _mm512_loadu_si512((__m512i*)wc_buffers[digit]);
-                    _mm512_storeu_si512((__m512i*)(dst + my_offsets[digit]), vec);
+                    // Flush 4 cache lines
+                    __m512i v0 = _mm512_loadu_si512((__m512i*)(wc_buffers[digit] + 0));
+                    __m512i v1 = _mm512_loadu_si512((__m512i*)(wc_buffers[digit] + 16));
+                    __m512i v2 = _mm512_loadu_si512((__m512i*)(wc_buffers[digit] + 32));
+                    __m512i v3 = _mm512_loadu_si512((__m512i*)(wc_buffers[digit] + 48));
+                    _mm512_storeu_si512((__m512i*)(dst + my_offsets[digit] + 0), v0);
+                    _mm512_storeu_si512((__m512i*)(dst + my_offsets[digit] + 16), v1);
+                    _mm512_storeu_si512((__m512i*)(dst + my_offsets[digit] + 32), v2);
+                    _mm512_storeu_si512((__m512i*)(dst + my_offsets[digit] + 48), v3);
                     my_offsets[digit] += WC_BUFFER_SIZE;
                     wc_counts[digit] = 0;
                 }
