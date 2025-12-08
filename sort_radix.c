@@ -67,10 +67,15 @@ void sort_array(uint32_t *arr, size_t size) {
     
     // Process each byte (4 passes for 32-bit integers)
     for (int pass = 0; pass < 4; pass++) {
-        t_start = get_time_sec();
+        double t_pass_start = get_time_sec();
+        double t_hist_start, t_hist_end;
+        double t_prefix_start, t_prefix_end;
+        double t_scatter_start, t_scatter_end;
+        
         int shift = pass * RADIX_BITS;
         
         // ===== Phase 1: Build local histograms in parallel (SIMD) =====
+        t_hist_start = get_time_sec();
         __m512i shift_vec = _mm512_set1_epi32(shift);
         __m512i mask_vec = _mm512_set1_epi32(RADIX_MASK);
         
@@ -128,8 +133,10 @@ void sort_array(uint32_t *arr, size_t size) {
                 local_hist[tid][digit]++;
             }
         }
+        t_hist_end = get_time_sec();
         
         // ===== Phase 2: Compute global histogram and prefix sum =====
+        t_prefix_start = get_time_sec();
         // Sum all local histograms
         memset(global_hist, 0, RADIX_SIZE * sizeof(size_t));
         for (int t = 0; t < NUM_THREADS; t++) {
@@ -153,8 +160,10 @@ void sort_array(uint32_t *arr, size_t size) {
                 offset += local_hist[t][d];
             }
         }
+        t_prefix_end = get_time_sec();
         
         // ===== Phase 4: Scatter elements to output with Write-Combining =====
+        t_scatter_start = get_time_sec();
         // Software write-combining: buffer writes locally, flush as cache lines
         #pragma omp parallel
         {
@@ -261,11 +270,17 @@ void sort_array(uint32_t *arr, size_t size) {
                 }
             }
         }
+        t_scatter_end = get_time_sec();
         
-        t_end = get_time_sec();
-        double throughput = (size * sizeof(uint32_t) * 2) / (t_end - t_start) / 1e9;
-        printf("Pass %d (bits %2d-%2d): %.3f sec (%.1f GB/s)\n", 
-               pass, shift, shift + RADIX_BITS - 1, t_end - t_start, throughput);
+        double t_pass_total = t_scatter_end - t_pass_start;
+        double t_hist = t_hist_end - t_hist_start;
+        double t_prefix = t_prefix_end - t_prefix_start;
+        double t_scatter = t_scatter_end - t_scatter_start;
+        
+        double throughput = (size * sizeof(uint32_t) * 2) / t_pass_total / 1e9;
+        printf("Pass %d (bits %2d-%2d): %.3f sec (%.1f GB/s)  [hist: %.3fs, prefix: %.4fs, scatter: %.3fs]\n", 
+               pass, shift, shift + RADIX_BITS - 1, t_pass_total, throughput,
+               t_hist, t_prefix, t_scatter);
         
         // Swap buffers
         uint32_t *swap = src;
