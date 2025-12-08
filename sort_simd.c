@@ -81,79 +81,7 @@ static inline __m512i sort_16_inline(
     v = _mm512_mask_blend_epi32(0x0FF0, lo, hi);
     
     t = _mm512_permutexvar_epi32(swap2, v);
-    lo = _mm512_min_epu32(v#include <stdio.h>
-        #include <stdlib.h>
-        #include <stdint.h> 
-        #include <pthread.h>
-        #include <string.h>
-        #include <time.h>
-        #include <immintrin.h>
-        #include <omp.h>
-        #include "utils.h"
-        #include "merge.h"
-        
-        // Number of threads for OpenMP parallelization
-        #define NUM_THREADS 16
-        
-        // Avoid making changes to this function skeleton, apart from data type changes if required
-        // In this starter code we have used uint32_t, feel free to change it to any other data type if required
-        void sort_array(uint32_t *arr, size_t size) {
-        
-        }
-        
-        // Insertion sort for small/remainder arrays
-        static inline void insertion_sort(uint32_t *arr, size_t size) {
-            for (size_t i = 1; i < size; i++) {
-                uint32_t key = arr[i];
-                size_t j = i;
-                while (j > 0 && arr[j - 1] > key) {
-                    arr[j] = arr[j - 1];
-                    j--;
-                }
-                arr[j] = key;
-            }
-        }
-        
-        // ============== SIMD Sorting Network ==============
-        // Bitonic sort for 16 elements in a single 512-bit register
-        
-        // Shuffle indices for bitonic sort - swap elements at distance d
-        static const int SORT_SWAP1_IDX[16] __attribute__((aligned(64))) = 
-            {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};  // distance 1: swap i <-> i^1
-        static const int SORT_SWAP2_IDX[16] __attribute__((aligned(64))) = 
-            {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};  // distance 2: swap i <-> i^2
-        static const int SORT_SWAP4_IDX[16] __attribute__((aligned(64))) = 
-            {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};  // distance 4: swap i <-> i^4
-        static const int SORT_SWAP8_IDX[16] __attribute__((aligned(64))) = 
-            {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};  // distance 8: swap i <-> i^8
-        
-        /*
-         * Inline sort_16 that accepts pre-loaded shuffle indices.
-         * OPTIMIZATION: Avoids 4 memory loads per call when indices are hoisted.
-         */
-        static inline __m512i sort_16_inline(
-            __m512i v,
-            const __m512i swap1,
-            const __m512i swap2,
-            const __m512i swap4,
-            const __m512i swap8
-        ) {
-            __m512i t, lo, hi;
-            
-            // ========== Stage 1: Sort pairs (distance 1) ==========
-            t = _mm512_permutexvar_epi32(swap1, v);
-            lo = _mm512_min_epu32(v, t);
-            hi = _mm512_max_epu32(v, t);
-            v = _mm512_mask_blend_epi32(0x6666, lo, hi);
-            
-            // ========== Stage 2: Merge into sorted 4s ==========
-            t = _mm512_permutexvar_epi32(swap2, v);
-            lo = _mm512_min_epu32(v, t);
-            hi = _mm512_max_epu32(v, t);
-            v = _mm512_mask_blend_epi32(0xC3C3, lo, hi);
-            
-            t = _mm512_permutexvar_epi32(swap1, v);
-            lo = _mm512_min_epu32(v,, t);
+    lo = _mm512_min_epu32(v, t);
     hi = _mm512_max_epu32(v, t);
     v = _mm512_mask_blend_epi32(0x33CC, lo, hi);
     
@@ -471,7 +399,24 @@ static inline double get_time_sec() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-
+// Order-independent hash using XOR and sum (parallel)
+// Returns two values: xor_hash and sum_hash
+static void compute_hash(uint32_t *arr, size_t size, uint64_t *xor_out, uint64_t *sum_out) {
+    uint64_t xor_hash = 0;
+    uint64_t sum_hash = 0;
+    
+    #pragma omp parallel reduction(^:xor_hash) reduction(+:sum_hash)
+    {
+        #pragma omp for schedule(static)
+        for (size_t i = 0; i < size; i++) {
+            xor_hash ^= arr[i];
+            sum_hash += arr[i];
+        }
+    }
+    
+    *xor_out = xor_hash;
+    *sum_out = sum_hash;
+}
 
 // Sort a single chunk with ALL threads collaborating (cache-friendly)
 // All threads work on the SAME chunk, keeping data hot in L3 cache

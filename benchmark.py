@@ -2,6 +2,7 @@
 """
 Benchmark script for sorting executables.
 Tests across orders of magnitude from 1K to 10GB elements.
+Tests multiple data distributions.
 Generates test data if it doesn't exist.
 """
 
@@ -26,8 +27,11 @@ TEST_SIZES = [
     (2_500_000_000, "2.5B (10GB)"),
 ]
 
-# Default distribution for benchmarking
-DEFAULT_DIST = "uniform"
+# All available distributions
+ALL_DISTRIBUTIONS = ['uniform', 'normal', 'pareto', 'sorted', 'reverse', 'nearly', 'same']
+
+# Default distributions to test (representative subset)
+DEFAULT_DISTRIBUTIONS = ['uniform', 'sorted', 'same']
 
 # Timeout per test (seconds) - scales with size
 BASE_TIMEOUT = 30  # seconds for 1M elements
@@ -159,43 +163,104 @@ def run_benchmark(executable: str, data_path: str, size: int) -> dict:
         }
 
 
-def print_results_table(results: list):
+def print_results_table(results: list, single_dist: bool = True):
     """Print results in a formatted table."""
-    print("\n" + "=" * 85)
-    print(f"{'Size':<12} {'Elements':<14} {'Time (s)':<12} {'Throughput':<14} {'Status':<12}")
-    print("=" * 85)
-    
-    for r in results:
-        size_str = r['size_name']
-        elements = f"{r['elements']:,}"
+    if single_dist:
+        print("\n" + "=" * 85)
+        print(f"{'Size':<12} {'Elements':<14} {'Time (s)':<12} {'Throughput':<14} {'Status':<12}")
+        print("=" * 85)
         
-        if r.get('error'):
-            time_str = "-"
-            throughput_str = "-"
-            status = f"FAIL: {r['error'][:20]}"
-        elif r.get('total_time'):
-            time_str = f"{r['total_time']:.3f}"
-            if r.get('throughput'):
-                throughput_str = f"{r['throughput']:.1f} GB/s"
+        for r in results:
+            size_str = r['size_name']
+            elements = f"{r['elements']:,}"
+            
+            if r.get('error'):
+                time_str = "-"
+                throughput_str = "-"
+                status = f"FAIL: {r['error'][:20]}"
+            elif r.get('total_time'):
+                time_str = f"{r['total_time']:.3f}"
+                if r.get('throughput'):
+                    throughput_str = f"{r['throughput']:.1f} GB/s"
+                else:
+                    # Calculate from size and time
+                    bytes_processed = r['elements'] * 4 * 2  # read + write
+                    throughput = bytes_processed / r['total_time'] / 1e9
+                    throughput_str = f"~{throughput:.1f} GB/s"
+                status = "OK" if r.get('success') else "UNKNOWN"
             else:
-                # Calculate from size and time
-                bytes_processed = r['elements'] * 4 * 2  # read + write
-                throughput = bytes_processed / r['total_time'] / 1e9
-                throughput_str = f"~{throughput:.1f} GB/s"
-            status = "OK" if r.get('success') else "UNKNOWN"
-        else:
-            time_str = f"{r.get('wall_time', 0):.3f}"
-            throughput_str = "-"
-            status = "NO OUTPUT"
+                time_str = f"{r.get('wall_time', 0):.3f}"
+                throughput_str = "-"
+                status = "NO OUTPUT"
+            
+            print(f"{size_str:<12} {elements:<14} {time_str:<12} {throughput_str:<14} {status:<12}")
         
-        print(f"{size_str:<12} {elements:<14} {time_str:<12} {throughput_str:<14} {status:<12}")
+        print("=" * 85)
+
+
+def print_multi_dist_table(all_results: dict, test_sizes: list, distributions: list):
+    """Print comparison table across multiple distributions."""
+    # Build header
+    dist_width = 12
+    header = f"{'Size':<8}"
+    for dist in distributions:
+        header += f" {dist:<{dist_width}}"
     
-    print("=" * 85)
+    print("\n" + "=" * (8 + len(distributions) * (dist_width + 1)))
+    print("TIMING COMPARISON (seconds)")
+    print("=" * (8 + len(distributions) * (dist_width + 1)))
+    print(header)
+    print("-" * (8 + len(distributions) * (dist_width + 1)))
+    
+    for size, size_name in test_sizes:
+        row = f"{size_name:<8}"
+        for dist in distributions:
+            key = (size, dist)
+            if key in all_results:
+                r = all_results[key]
+                if r.get('total_time'):
+                    row += f" {r['total_time']:<{dist_width}.3f}"
+                elif r.get('error'):
+                    row += f" {'FAIL':<{dist_width}}"
+                else:
+                    row += f" {'-':<{dist_width}}"
+            else:
+                row += f" {'-':<{dist_width}}"
+        print(row)
+    
+    print("=" * (8 + len(distributions) * (dist_width + 1)))
+    
+    # Throughput table
+    print("\nTHROUGHPUT COMPARISON (GB/s)")
+    print("=" * (8 + len(distributions) * (dist_width + 1)))
+    print(header)
+    print("-" * (8 + len(distributions) * (dist_width + 1)))
+    
+    for size, size_name in test_sizes:
+        row = f"{size_name:<8}"
+        for dist in distributions:
+            key = (size, dist)
+            if key in all_results:
+                r = all_results[key]
+                if r.get('throughput'):
+                    row += f" {r['throughput']:<{dist_width}.1f}"
+                elif r.get('total_time') and r['total_time'] > 0:
+                    # Calculate throughput
+                    bytes_processed = size * 4 * 2
+                    tp = bytes_processed / r['total_time'] / 1e9
+                    row += f" {tp:<{dist_width}.1f}"
+                else:
+                    row += f" {'-':<{dist_width}}"
+            else:
+                row += f" {'-':<{dist_width}}"
+        print(row)
+    
+    print("=" * (8 + len(distributions) * (dist_width + 1)))
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark sorting executables across various array sizes"
+        description="Benchmark sorting executables across various array sizes and distributions"
     )
     parser.add_argument(
         "executable",
@@ -203,9 +268,15 @@ def main():
     )
     parser.add_argument(
         "--dist", "-d",
-        default=DEFAULT_DIST,
-        choices=['uniform', 'normal', 'pareto', 'sorted', 'reverse', 'nearly', 'same'],
-        help=f"Data distribution to test (default: {DEFAULT_DIST})"
+        nargs='+',
+        default=None,
+        choices=ALL_DISTRIBUTIONS,
+        help=f"Distribution(s) to test. Can specify multiple. (default: {DEFAULT_DISTRIBUTIONS})"
+    )
+    parser.add_argument(
+        "--all-dists", "-a",
+        action="store_true",
+        help="Test all available distributions"
     )
     parser.add_argument(
         "--min-size", "-m",
@@ -229,6 +300,11 @@ def main():
         action="store_true",
         help="Show full output from sorting program"
     )
+    parser.add_argument(
+        "--quiet", "-q",
+        action="store_true",
+        help="Minimal output during benchmarking"
+    )
     
     args = parser.parse_args()
     
@@ -237,6 +313,8 @@ def main():
         for i, (size, name) in enumerate(TEST_SIZES):
             bytes_size = size * 4
             print(f"  {i}: {name:<12} ({size:>15,} elements, {human_size(bytes_size):>10})")
+        print("\nAvailable distributions:")
+        print(f"  {', '.join(ALL_DISTRIBUTIONS)}")
         return 0
     
     # Check executable exists
@@ -245,65 +323,100 @@ def main():
         print("Try running 'make' first to build the sorting programs.")
         return 1
     
+    # Determine which distributions to test
+    if args.all_dists:
+        distributions = ALL_DISTRIBUTIONS
+    elif args.dist:
+        distributions = args.dist
+    else:
+        distributions = DEFAULT_DISTRIBUTIONS
+    
     # Ensure datasets directory exists
     os.makedirs("datasets", exist_ok=True)
     
     # Filter test sizes based on arguments
     test_sizes = TEST_SIZES[args.min_size:args.max_size + 1]
     
-    print(f"\nBenchmarking: {args.executable}")
-    print(f"Distribution: {args.dist}")
+    print(f"\n{'='*60}")
+    print(f"Benchmarking: {args.executable}")
+    print(f"Distributions: {', '.join(distributions)}")
     print(f"Test sizes: {len(test_sizes)} ({test_sizes[0][1]} to {test_sizes[-1][1]})")
-    print("-" * 60)
+    print(f"Total tests: {len(test_sizes) * len(distributions)}")
+    print(f"{'='*60}")
     
-    results = []
+    # Store all results keyed by (size, distribution)
+    all_results = {}
     
-    for size, size_name in test_sizes:
-        print(f"\n[{size_name}] Testing {size:,} elements ({human_size(size * 4)})...")
+    for dist in distributions:
+        print(f"\n{'─'*60}")
+        print(f"Distribution: {dist.upper()}")
+        print(f"{'─'*60}")
         
-        # Ensure test data exists
-        data_path = ensure_data_exists(size, args.dist)
-        if not data_path:
-            results.append({
-                'elements': size,
-                'size_name': size_name,
-                'error': "Data generation failed"
-            })
-            continue
-        
-        # Run benchmark
-        print(f"  [→] Running {args.executable}...")
-        result = run_benchmark(args.executable, data_path, size)
-        result['elements'] = size
-        result['size_name'] = size_name
-        
-        if args.verbose and result.get('stdout'):
-            print("  --- Output ---")
-            for line in result['stdout'].strip().split('\n'):
-                print(f"  | {line}")
-            print("  --- End ---")
-        
-        if result.get('error'):
-            print(f"  [✗] {result['error']}")
-        elif result.get('total_time'):
-            print(f"  [✓] Completed in {result['total_time']:.3f}s", end="")
-            if result.get('throughput'):
-                print(f" ({result['throughput']:.1f} GB/s)")
-            else:
-                print()
-        
-        results.append(result)
+        for size, size_name in test_sizes:
+            if not args.quiet:
+                print(f"\n[{dist}/{size_name}] {size:,} elements ({human_size(size * 4)})...")
+            
+            # Ensure test data exists
+            data_path = ensure_data_exists(size, dist)
+            if not data_path:
+                all_results[(size, dist)] = {
+                    'elements': size,
+                    'size_name': size_name,
+                    'dist': dist,
+                    'error': "Data generation failed"
+                }
+                continue
+            
+            # Run benchmark
+            if not args.quiet:
+                print(f"  [→] Running {args.executable}...")
+            result = run_benchmark(args.executable, data_path, size)
+            result['elements'] = size
+            result['size_name'] = size_name
+            result['dist'] = dist
+            
+            if args.verbose and result.get('stdout'):
+                print("  --- Output ---")
+                for line in result['stdout'].strip().split('\n'):
+                    print(f"  | {line}")
+                print("  --- End ---")
+            
+            if result.get('error'):
+                print(f"  [✗] {result['error']}")
+            elif result.get('total_time'):
+                if not args.quiet:
+                    print(f"  [✓] {result['total_time']:.3f}s", end="")
+                    if result.get('throughput'):
+                        print(f" ({result['throughput']:.1f} GB/s)")
+                    else:
+                        print()
+                else:
+                    # One-line summary in quiet mode
+                    tp = result.get('throughput', 0)
+                    print(f"  {dist}/{size_name}: {result['total_time']:.3f}s ({tp:.1f} GB/s)")
+            
+            all_results[(size, dist)] = result
     
-    # Print summary table
-    print_results_table(results)
+    # Print comparison tables
+    if len(distributions) > 1:
+        print_multi_dist_table(all_results, test_sizes, distributions)
+    else:
+        # Single distribution - use simple table
+        results = [all_results[(s, distributions[0])] for s, _ in test_sizes if (s, distributions[0]) in all_results]
+        print_results_table(results, single_dist=True)
     
     # Print CSV-style output for easy copy-paste
     print("\nCSV output (for plotting):")
-    print("elements,time_seconds,throughput_gbps")
-    for r in results:
-        if r.get('total_time'):
-            tp = r.get('throughput', 0)
-            print(f"{r['elements']},{r['total_time']:.4f},{tp:.2f}")
+    print("distribution,elements,time_seconds,throughput_gbps")
+    for dist in distributions:
+        for size, _ in test_sizes:
+            key = (size, dist)
+            if key in all_results:
+                r = all_results[key]
+                total_time = r.get('total_time')
+                if total_time is not None:
+                    tp = r.get('throughput') or 0
+                    print(f"{dist},{size},{total_time:.4f},{tp:.2f}")
     
     return 0
 
