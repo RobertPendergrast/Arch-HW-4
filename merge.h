@@ -45,4 +45,14 @@ void merge_arrays(
     uint32_t *arr
 );
 
+// Variant that accepts unaligned inputs (for parallel merge splitting)
+// Output MUST still be 64-byte aligned
+void merge_arrays_unaligned(
+    uint32_t *left,
+    size_t size_left,
+    uint32_t *right,
+    size_t size_right,
+    uint32_t *arr
+);
+
 #endif
