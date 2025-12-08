@@ -29,4 +29,8 @@ void print_128_num(__m128i var);
 
 // Prints out the values in an mm512i register
 void print_512_num(__m512i var);
+
+// Order-independent hash using XOR and sum (parallel)
+// Returns two values: xor_hash and sum_hash
+void compute_hash(uint32_t *arr, size_t size, uint64_t *xor_out, uint64_t *sum_out);
 #endif

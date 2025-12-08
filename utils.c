@@ -114,3 +114,22 @@ void print_512_num(__m512i var)
         val[8], val[9], val[10], val[11], val[12], val[13], val[14], val[15]
     );
 }
+
+// Order-independent hash using XOR and sum (parallel)
+// Returns two values: xor_hash and sum_hash
+static void compute_hash(uint32_t *arr, size_t size, uint64_t *xor_out, uint64_t *sum_out) {
+    uint64_t xor_hash = 0;
+    uint64_t sum_hash = 0;
+    
+    #pragma omp parallel reduction(^:xor_hash) reduction(+:sum_hash)
+    {
+        #pragma omp for schedule(static)
+        for (size_t i = 0; i < size; i++) {
+            xor_hash ^= arr[i];
+            sum_hash += arr[i];
+        }
+    }
+    
+    *xor_out = xor_hash;
+    *sum_out = sum_hash;
+}
