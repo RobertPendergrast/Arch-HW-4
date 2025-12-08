@@ -6,10 +6,13 @@
 #include <time.h>
 #include "utils.h"
 
-// L3 cache is 33MB (i think), so 8 threads with 4MB each maximizes cache locality
-#define NUM_THREADS 8
-#define CACHE_SIZE_MB 32
-#define CHUNK_SIZE (CACHE_SIZE_MB / NUM_THREADS * 1024 * 1024 / sizeof(uint32_t))
+// L3 cache is 33MB (i think), so 16 threads with 2MB (basically) each maximizes cache locality
+#define CACHE_SIZE_MB 33
+#define MAX_THREADS 16
+
+// CSV logging flag - set to 1 to enable, 0 to disable
+#define ENABLE_CSV_LOGGING 1
+#define CSV_FILENAME "multi_sort_results.csv"
 
 // Helper to compute elapsed time in seconds
 static double elapsed_sec(struct timespec start, struct timespec end) {
@@ -76,20 +79,20 @@ static void *merge_thread_fn(void *arg) {
     return NULL;
 }
 
-// Phase 1: Sort all chunks in parallel (8 threads at a time)
-static size_t parallel_sort_chunks(uint32_t *arr, size_t n) {
-    size_t num_chunks = (n + CHUNK_SIZE - 1) / CHUNK_SIZE;
+// Phase 1: Sort all chunks in parallel
+static size_t parallel_sort_chunks(uint32_t *arr, size_t n, int num_threads, size_t chunk_size) {
+    size_t num_chunks = (n + chunk_size - 1) / chunk_size;
     
-    for (size_t batch = 0; batch < num_chunks; batch += NUM_THREADS) {
-        pthread_t threads[NUM_THREADS];
-        SortTask tasks[NUM_THREADS];
+    for (size_t batch = 0; batch < num_chunks; batch += num_threads) {
+        pthread_t threads[MAX_THREADS];
+        SortTask tasks[MAX_THREADS];
         int active = 0;
         
-        for (int t = 0; t < NUM_THREADS && (batch + t) < num_chunks; t++) {
+        for (int t = 0; t < num_threads && (batch + t) < num_chunks; t++) {
             size_t idx = batch + t;
             tasks[active].arr = arr;
-            tasks[active].start = idx * CHUNK_SIZE;
-            tasks[active].end = (idx + 1) * CHUNK_SIZE;
+            tasks[active].start = idx * chunk_size;
+            tasks[active].end = (idx + 1) * chunk_size;
             if (tasks[active].end > n) tasks[active].end = n;
             
             pthread_create(&threads[active], NULL, sort_thread_fn, &tasks[active]);
@@ -107,22 +110,23 @@ static size_t parallel_sort_chunks(uint32_t *arr, size_t n) {
 // Hierarchical merge with thread halving
 // When num_chunks is odd, the last chunk is left alone (already sorted)
 // and gets merged in the next level
-static void parallel_merge_recursive(uint32_t *arr, size_t n, size_t num_chunks) {
-    size_t chunk_size = CHUNK_SIZE;
+static void parallel_merge_recursive(uint32_t *arr, size_t n, size_t num_chunks, 
+                                     size_t initial_chunk_size, int max_threads) {
+    size_t chunk_size = initial_chunk_size;
     
     while (num_chunks > 1) {
         size_t num_merges = num_chunks / 2;
         
         //Reduce threads to use as needed
-        int threads_to_use = (num_merges < NUM_THREADS) ? (int)num_merges : NUM_THREADS;
+        int threads_to_use = (num_merges < max_threads) ? (int)num_merges : max_threads;
         
         printf("%3zu chunks -> %3zu chunks | Merges: %3zu | Threads: %d\n", 
                num_chunks, (num_chunks + 1) / 2, num_merges, threads_to_use);
         
         for (size_t batch = 0; batch < num_merges; batch += threads_to_use) {
-            pthread_t threads[NUM_THREADS];
-            MergeTask tasks[NUM_THREADS];
-            uint32_t *tmps[NUM_THREADS];
+            pthread_t threads[MAX_THREADS];
+            MergeTask tasks[MAX_THREADS];
+            uint32_t *tmps[MAX_THREADS];
             int active = 0;
             
             for (int t = 0; t < threads_to_use && (batch + t) < num_merges; t++) {
@@ -158,13 +162,16 @@ static void parallel_merge_recursive(uint32_t *arr, size_t n, size_t num_chunks)
     }
 }
 
-void sort_array(uint32_t *arr, size_t n) {
+void sort_array(uint32_t *arr, size_t n, int num_threads) {
     struct timespec start1, end1, start2, end2;
+    
+    // Calculate chunk size based on number of threads
+    size_t chunk_size = (CACHE_SIZE_MB / num_threads * 1024 * 1024 / sizeof(uint32_t));
 
     // Phase 1: Sort chunks
-    printf("Starting thread level sort...\n");
+    printf("Starting thread level sort (%d threads)...\n", num_threads);
     clock_gettime(CLOCK_MONOTONIC, &start1);
-    size_t num_chunks = parallel_sort_chunks(arr, n);
+    size_t num_chunks = parallel_sort_chunks(arr, n, num_threads, chunk_size);
     clock_gettime(CLOCK_MONOTONIC, &end1);
     double t1 = elapsed_sec(start1, end1);
     printf("%zu chunks sorted in %.3fs\n\n", num_chunks, t1);
@@ -172,17 +179,39 @@ void sort_array(uint32_t *arr, size_t n) {
     // Phase 2: Merge chunks
     printf("Starting recursive merge...\n");
     clock_gettime(CLOCK_MONOTONIC, &start2);
-    parallel_merge_recursive(arr, n, num_chunks);
+    parallel_merge_recursive(arr, n, num_chunks, chunk_size, num_threads);
     clock_gettime(CLOCK_MONOTONIC, &end2);
     double t2 = elapsed_sec(start2, end2);
     printf("Merges completed in %.3fs\n\n", t2);
 
-    printf("Total time: %.3fs\n", t1 + t2);
+    double total = t1 + t2;
+    printf("Total time: %.3fs\n", total);
+    
+    // Write to CSV if enabled
+    #if ENABLE_CSV_LOGGING
+    FILE *csv = fopen(CSV_FILENAME, "a");
+    if (csv) {
+        // Write header if file is new
+        fseek(csv, 0, SEEK_END);
+        if (ftell(csv) == 0) {
+            fprintf(csv, "threads,total_time,phase1_time,phase2_time\n");
+        }
+        fprintf(csv, "%d,%.6f,%.6f,%.6f\n", num_threads, total, t1, t2);
+        fclose(csv);
+    }
+    #endif
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <input_file>\n", argv[0]);
+    if (argc < 3) {
+        printf("Usage: %s <input_file> <num_threads>\n", argv[0]);
+        printf("  num_threads: 1, 2, 4, 8, or 16\n");
+        return 1;
+    }
+
+    int num_threads = atoi(argv[2]);
+    if (num_threads < 1 || num_threads > MAX_THREADS) {
+        printf("Error: num_threads must be between 1 and %d\n", MAX_THREADS);
         return 1;
     }
 
@@ -190,9 +219,10 @@ int main(int argc, char *argv[]) {
     uint32_t *arr = read_array_from_file(argv[1], &size);
     if (!arr) return 1;
 
-    printf("Read %lu elements from %s\n\n", size, argv[1]);
+    printf("Read %lu elements from %s\n", size, argv[1]);
+    printf("Using %d threads\n\n", num_threads);
     
-    sort_array(arr, size);
+    sort_array(arr, size, num_threads);
 
     if (verify_sortedness(arr, size)) {
         printf("Array sorted successfully!\n");

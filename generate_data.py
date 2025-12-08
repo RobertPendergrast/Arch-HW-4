@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-DISTRIBUTIONS = ['uniform', 'normal', 'pareto', 'sorted', 'reverse', 'nearly', 'same']
+DISTRIBUTIONS = ['uniform', 'normal', 'pareto', 'sorted', 'reverse', 'nearly']
 
 # Chunk size: 16M elements = 64 MB per chunk
 CHUNK_SIZE = 16 * 1024 * 1024
