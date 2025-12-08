@@ -389,94 +389,119 @@ void sort_array(uint32_t *arr, size_t size) {
     
     int stage = 1;
     
-    // Bottom-up: start with runs of BASE_CASE_SIZE, QUADRUPLE each iteration (4-way merge)
-    for (size_t run_size = BASE_CASE_SIZE; run_size < size; run_size *= 4) {
+    // Bottom-up: start with runs of BASE_CASE_SIZE, double each iteration
+    for (size_t run_size = BASE_CASE_SIZE; run_size < size; run_size *= 2) {
         clock_gettime(CLOCK_MONOTONIC, &stage_start);
         
-        // Calculate number of 4-way merges at this level
-        size_t num_merges = (size + 4 * run_size - 1) / (4 * run_size);
+        // Calculate number of merges at this level
+        size_t num_merges = (size + 2 * run_size - 1) / (2 * run_size);
         
         if (num_merges >= PARALLEL_MERGE_THRESHOLD) {
-            // Many merges: parallelize across 4-way merges
+            // Many merges: use interleaved merge (2 merges per thread iteration)
+            // This hides latency by giving CPU independent work streams
+            size_t pair_stride = 4 * run_size;  // Each iteration handles 2 merge pairs
+            
             #pragma omp parallel for schedule(dynamic)
-            for (size_t i = 0; i < size; i += 4 * run_size) {
-                // Calculate the 4 runs for this 4-way merge
-                size_t start0 = i;
-                size_t start1 = i + run_size;
-                size_t start2 = i + 2 * run_size;
-                size_t start3 = i + 3 * run_size;
+            for (size_t i = 0; i < size; i += pair_stride) {
+                // Merge pair 0
+                size_t left_start0 = i;
+                size_t left_end0 = (i + run_size < size) ? i + run_size : size;
+                size_t right_start0 = left_end0;
+                size_t right_end0 = (i + 2 * run_size < size) ? i + 2 * run_size : size;
+                size_t left_size0 = left_end0 - left_start0;
+                size_t right_size0 = right_end0 - right_start0;
                 
-                size_t size0 = (start0 < size) ? ((start1 < size) ? run_size : size - start0) : 0;
-                size_t size1 = (start1 < size) ? ((start2 < size) ? run_size : size - start1) : 0;
-                size_t size2 = (start2 < size) ? ((start3 < size) ? run_size : size - start2) : 0;
-                size_t size3 = (start3 < size) ? ((start3 + run_size < size) ? run_size : size - start3) : 0;
+                // Merge pair 1 (next pair, if exists)
+                size_t base1 = i + 2 * run_size;
+                size_t left_start1 = base1;
+                size_t left_end1 = (base1 + run_size < size) ? base1 + run_size : size;
+                size_t right_start1 = left_end1;
+                size_t right_end1 = (base1 + 2 * run_size < size) ? base1 + 2 * run_size : size;
+                size_t left_size1 = (base1 < size) ? left_end1 - left_start1 : 0;
+                size_t right_size1 = (right_start1 < size) ? right_end1 - right_start1 : 0;
                 
-                // Count how many runs we actually have
-                int num_runs = (size0 > 0) + (size1 > 0) + (size2 > 0) + (size3 > 0);
-                
-                if (num_runs == 4) {
-                    // Full 4-way merge
-                    stable_merge_4way(src + start0, size0, src + start1, size1,
-                                     src + start2, size2, src + start3, size3,
-                                     dst + start0);
-                } else if (num_runs == 3) {
-                    // 3 runs: do 2-way merge of first two, then 2-way with third
-                    uint32_t *temp_buf = aligned_alloc(64, (size0 + size1) * sizeof(uint32_t));
-                    stable_merge(src + start0, size0, src + start1, size1, temp_buf);
-                    stable_merge(temp_buf, size0 + size1, src + start2, size2, dst + start0);
-                    free(temp_buf);
-                } else if (num_runs == 2) {
-                    // 2 runs: standard 2-way merge
-                    stable_merge(src + start0, size0, src + start1, size1, dst + start0);
-                } else if (num_runs == 1) {
-                    // Just copy
-                    memcpy(dst + start0, src + start0, size0 * sizeof(uint32_t));
+                // Check if we have two valid merge pairs
+                if (left_size1 > 0 && right_size0 > 0 && right_size1 > 0) {
+                    // Both pairs are complete merges - use interleaved
+                    stable_merge_interleaved_2(
+                        src + left_start0, left_size0, src + right_start0, right_size0, dst + left_start0,
+                        src + left_start1, left_size1, src + right_start1, right_size1, dst + left_start1
+                    );
+                } else {
+                    // Handle pair 0
+                    if (right_size0 == 0) {
+                        memcpy(dst + left_start0, src + left_start0, left_size0 * sizeof(uint32_t));
+                    } else {
+                        stable_merge(src + left_start0, left_size0,
+                                   src + right_start0, right_size0,
+                                   dst + left_start0);
+                    }
+                    // Handle pair 1 if it exists
+                    if (left_size1 > 0) {
+                        if (right_size1 == 0) {
+                            memcpy(dst + left_start1, src + left_start1, left_size1 * sizeof(uint32_t));
+                        } else {
+                            stable_merge(src + left_start1, left_size1,
+                                       src + right_start1, right_size1,
+                                       dst + left_start1);
+                        }
+                    }
                 }
             }
         } else {
-            // Few 4-way merges: process them with parallel 2-way merge internally
-            for (size_t i = 0; i < size; i += 4 * run_size) {
-                size_t start0 = i;
-                size_t start1 = i + run_size;
-                size_t start2 = i + 2 * run_size;
-                size_t start3 = i + 3 * run_size;
+            // Few merges: use multiple threads PER merge
+            // Collect all merge tasks first
+            merge_task_t tasks[num_merges];
+            size_t task_idx = 0;
+            
+            for (size_t i = 0; i < size; i += 2 * run_size) {
+                size_t left_start = i;
+                size_t left_end = (i + run_size < size) ? i + run_size : size;
+                size_t right_start = left_end;
+                size_t right_end = (i + 2 * run_size < size) ? i + 2 * run_size : size;
                 
-                size_t size0 = (start0 < size) ? ((start1 < size) ? run_size : size - start0) : 0;
-                size_t size1 = (start1 < size) ? ((start2 < size) ? run_size : size - start1) : 0;
-                size_t size2 = (start2 < size) ? ((start3 < size) ? run_size : size - start2) : 0;
-                size_t size3 = (start3 < size) ? ((start3 + run_size < size) ? run_size : size - start3) : 0;
-                
-                int num_runs = (size0 > 0) + (size1 > 0) + (size2 > 0) + (size3 > 0);
-                
-                if (num_runs == 4) {
-                    // 4-way merge using parallel 2-way merges
-                    // First: merge (0,1) and (2,3) in parallel
-                    uint32_t *temp1 = aligned_alloc(64, (size0 + size1) * sizeof(uint32_t));
-                    uint32_t *temp2 = aligned_alloc(64, (size2 + size3) * sizeof(uint32_t));
-                    
-                    #pragma omp parallel sections
-                    {
-                        #pragma omp section
-                        parallel_merge(src + start0, size0, src + start1, size1, temp1, NUM_THREADS/2);
-                        #pragma omp section
-                        parallel_merge(src + start2, size2, src + start3, size3, temp2, NUM_THREADS/2);
+                tasks[task_idx].left = src + left_start;
+                tasks[task_idx].left_size = left_end - left_start;
+                tasks[task_idx].right = src + right_start;
+                tasks[task_idx].right_size = right_end - right_start;
+                tasks[task_idx].out = dst + left_start;
+                task_idx++;
+            }
+            
+            // Calculate threads per merge
+            int threads_per_merge = NUM_THREADS / num_merges;
+            if (threads_per_merge < 2) threads_per_merge = 2;
+            if (threads_per_merge > NUM_THREADS) threads_per_merge = NUM_THREADS;
+            
+            // For very few merges (1-4), process sequentially but with parallel merge
+            if (num_merges <= 4) {
+                for (size_t t = 0; t < num_merges; t++) {
+                    if (tasks[t].right_size == 0) {
+                        memcpy(tasks[t].out, tasks[t].left, 
+                               tasks[t].left_size * sizeof(uint32_t));
+                    } else {
+                        parallel_merge(tasks[t].left, tasks[t].left_size,
+                                      tasks[t].right, tasks[t].right_size,
+                                      tasks[t].out, NUM_THREADS);
                     }
-                    
-                    // Then: merge the two results
-                    parallel_merge(temp1, size0 + size1, temp2, size2 + size3, dst + start0, NUM_THREADS);
-                    
-                    free(temp1);
-                    free(temp2);
-                } else if (num_runs == 3) {
-                    uint32_t *temp1 = aligned_alloc(64, (size0 + size1) * sizeof(uint32_t));
-                    parallel_merge(src + start0, size0, src + start1, size1, temp1, NUM_THREADS);
-                    parallel_merge(temp1, size0 + size1, src + start2, size2, dst + start0, NUM_THREADS);
-                    free(temp1);
-                } else if (num_runs == 2) {
-                    parallel_merge(src + start0, size0, src + start1, size1, dst + start0, NUM_THREADS);
-                } else if (num_runs == 1) {
-                    memcpy(dst + start0, src + start0, size0 * sizeof(uint32_t));
                 }
+            } else {
+                // For moderate number of merges (5-15), use nested parallelism
+                // Outer loop: parallelize across merges
+                // Inner: each merge uses threads_per_merge threads
+                omp_set_nested(1);
+                #pragma omp parallel for num_threads(num_merges) schedule(static, 1)
+                for (size_t t = 0; t < num_merges; t++) {
+                    if (tasks[t].right_size == 0) {
+                        memcpy(tasks[t].out, tasks[t].left, 
+                               tasks[t].left_size * sizeof(uint32_t));
+                    } else {
+                        parallel_merge(tasks[t].left, tasks[t].left_size,
+                                      tasks[t].right, tasks[t].right_size,
+                                      tasks[t].out, threads_per_merge);
+                    }
+                }
+                omp_set_nested(0);
             }
         }
         
@@ -484,7 +509,7 @@ void sort_array(uint32_t *arr, size_t size) {
         stage_time = (stage_end.tv_sec - stage_start.tv_sec) + 
                     (stage_end.tv_nsec - stage_start.tv_nsec) / 1e9;
         
-        printf("Stage %2d: run_size=%8zu, 4way_merges=%6zu, time=%.6f sec\n", 
+        printf("Stage %2d: run_size=%8zu, merges=%6zu, time=%.6f sec\n", 
                stage, run_size, num_merges, stage_time);
         stage++;
         
