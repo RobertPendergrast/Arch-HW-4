@@ -89,13 +89,20 @@ const int IDX_SWAP8[16] __attribute__((aligned(64))) = {8,9,10,11,12,13,14,15,0,
 const int IDX_SWAP4[16] __attribute__((aligned(64))) = {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};
 
 // Odd-even merge shuffle indices
-// SHUFFLE_OE1: swap 8-element halves
+// Level 1-2 (512-bit scale)
 const int IDX_OE_SWAP8[16] __attribute__((aligned(64))) = {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};
-// SHUFFLE_OE2: swap 4-element groups within each 8-element half
 const int IDX_OE_SWAP4[16] __attribute__((aligned(64))) = {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};
-// SHUFFLE_OE3: reverse within each 4-element group (for Level 3 merge setup)
+// Level 3-5 (128-bit scale, applied to all 4 lanes in parallel)
+// Swap pairs within each 128-bit lane: 0b01001110 = {2,3,0,1}
+const int IDX_OE_SWAP2_LANE[16] __attribute__((aligned(64))) = {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};
+// Swap adjacent within each 128-bit lane: 0b10110001 = {1,0,3,2}
+const int IDX_OE_SWAP_ADJ[16] __attribute__((aligned(64))) = {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};
+// Final shuffles for Level 5: 0b11011000 = {0,2,1,3}
+const int IDX_OE_FINAL_L[16] __attribute__((aligned(64))) = {0,2,1,3,4,6,5,7,8,10,9,11,12,14,13,15};
+// Final shuffles for Level 5: 0b01110010 = {2,0,3,1}
+const int IDX_OE_FINAL_H[16] __attribute__((aligned(64))) = {2,0,3,1,6,4,7,5,10,8,11,9,14,12,15,13};
+// Legacy indices (kept for compatibility)
 const int IDX_OE_REV4[16] __attribute__((aligned(64))) = {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};
-// SHUFFLE_OE4: swap pairs within each 4-element group (distance 2 clean)
 const int IDX_OE_SWAP2[16] __attribute__((aligned(64))) = {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};
 
 // Inline version that accepts pre-loaded indices to avoid repeated memory loads
@@ -176,76 +183,72 @@ inline __attribute__((always_inline)) void merge_512_registers(
 }
 
 /*
- * ALTERNATIVE: Odd-Even Merge Network
+ * ALTERNATIVE: Odd-Even Merge Network (Pure 512-bit)
  * 
- * Based on Batcher's odd-even merge algorithm adapted for AVX-512.
+ * Based on the working 128-bit implementation, extended to 512-bit.
  * Structure:
- *   Level 1-2: Odd-even interleave pattern
- *   Level 3-5: 4 parallel 4+4 element merges (bitonic clean within groups)
+ *   Level 1-2: 512-bit scale interleave (halves, then groups of 4)
+ *   Level 3-5: 128-bit scale interleave (4 parallel 128-bit merges)
+ * 
+ * Blend masks:
+ *   Level 1: 0xFF00 (upper 8 from H)
+ *   Level 2: 0xF0F0 (groups of 4 from H)
+ *   Level 3: 0xCCCC (0b1100 per 128-bit lane)
+ *   Level 4: 0xAAAA (0b1010 per 128-bit lane)
+ *   Level 5: 0xCCCC (0b1100 per 128-bit lane)
  */
 static inline __attribute__((always_inline)) void merge_512_oddeven_inline(
     __m512i *left,
     __m512i *right,
     const __m512i idx_rev,
-    const __m512i idx_oe_swap8,
-    const __m512i idx_oe_swap4,
-    const __m512i idx_oe_rev4,
-    const __m512i idx_oe_swap2
+    const __m512i idx_swap8,
+    const __m512i idx_swap4,
+    const __m512i idx_swap2_lane,
+    const __m512i idx_swap_adj,
+    const __m512i idx_final_L,
+    const __m512i idx_final_H
 ) {
-    // Step 0: Reverse right register to form bitonic sequence
+    // Step 0: Reverse right register
     *right = _mm512_permutexvar_epi32(idx_rev, *right);
 
-    // Level 1: Distance 16 compare + odd/even interleave
+    // Level 1 (512-bit): min/max + interleave upper/lower halves
     __m512i L1 = _mm512_min_epu32(*left, *right);
     __m512i H1 = _mm512_max_epu32(*left, *right);
-    // Interleave: odd positions from H1, even positions from L1
-    __m512i L1p = _mm512_mask_blend_epi32(_512_BLEND_1, L1, H1);
-    __m512i H1p = _mm512_mask_blend_epi32(_512_BLEND_1, H1, L1);
-    // Shuffle H1p: swap 8-element halves
-    H1p = _mm512_permutexvar_epi32(idx_oe_swap8, H1p);
+    __m512i L1p = _mm512_mask_blend_epi32(0xFF00, L1, H1);  // upper 8 from H1
+    __m512i H1p = _mm512_mask_blend_epi32(0xFF00, H1, L1);  // upper 8 from L1
+    H1p = _mm512_permutexvar_epi32(idx_swap8, H1p);  // swap halves
 
-    // Level 2: Distance 8 compare + interleave pairs
+    // Level 2 (512-bit): min/max + interleave groups of 4
     __m512i L2 = _mm512_min_epu32(L1p, H1p);
     __m512i H2 = _mm512_max_epu32(L1p, H1p);
-    // Interleave: pairs from H2 and L2
-    __m512i L2p = _mm512_mask_blend_epi32(_512_BLEND_2, L2, H2);
-    __m512i H2p = _mm512_mask_blend_epi32(_512_BLEND_2, H2, L2);
-    // Shuffle H2p: swap 4-element groups within each 8-element half
-    H2p = _mm512_permutexvar_epi32(idx_oe_swap4, H2p);
+    __m512i L2p = _mm512_mask_blend_epi32(0xF0F0, L2, H2);  // groups of 4 from H2
+    __m512i H2p = _mm512_mask_blend_epi32(0xF0F0, H2, L2);  // groups of 4 from L2
+    H2p = _mm512_permutexvar_epi32(idx_swap4, H2p);  // swap 4-groups within halves
 
-    // Level 3: Now L2p and H2p need 4 parallel 4+4 element merges
-    // First, reverse each 4-element group in H2p to set up for bitonic merge
-    H2p = _mm512_permutexvar_epi32(idx_oe_rev4, H2p);
-    
-    // Level 3: Compare-swap across the 4-element groups
+    // Level 3 (128-bit Level 1): min/max + interleave pairs (0b1100 per lane)
     __m512i L3 = _mm512_min_epu32(L2p, H2p);
     __m512i H3 = _mm512_max_epu32(L2p, H2p);
+    __m512i L3p = _mm512_mask_blend_epi32(0xCCCC, L3, H3);  // pos 2,3 from H3 per lane
+    __m512i H3p = _mm512_mask_blend_epi32(0xCCCC, H3, L3);  // pos 2,3 from L3 per lane
+    H3p = _mm512_permutexvar_epi32(idx_swap2_lane, H3p);  // swap pairs within lanes
 
-    // Level 4: Distance 2 clean within each 4-element group (bitonic clean)
-    // Shuffle to compare elements at distance 2
-    __m512i L3_shuf = _mm512_permutexvar_epi32(idx_oe_swap2, L3);
-    __m512i H3_shuf = _mm512_permutexvar_epi32(idx_oe_swap2, H3);
-    
-    __m512i L4_lo = _mm512_min_epu32(L3, L3_shuf);
-    __m512i L4_hi = _mm512_max_epu32(L3, L3_shuf);
-    __m512i L4 = _mm512_mask_blend_epi32(_512_BLEND_2, L4_lo, L4_hi);
-    
-    __m512i H4_lo = _mm512_min_epu32(H3, H3_shuf);
-    __m512i H4_hi = _mm512_max_epu32(H3, H3_shuf);
-    __m512i H4 = _mm512_mask_blend_epi32(_512_BLEND_2, H4_lo, H4_hi);
+    // Level 4 (128-bit Level 2): min/max + interleave alternating (0b1010 per lane)
+    __m512i L4 = _mm512_min_epu32(L3p, H3p);
+    __m512i H4 = _mm512_max_epu32(L3p, H3p);
+    __m512i L4p = _mm512_mask_blend_epi32(0xAAAA, L4, H4);  // pos 1,3 from H4 per lane
+    __m512i H4p = _mm512_mask_blend_epi32(0xAAAA, H4, L4);  // pos 1,3 from L4 per lane
+    H4p = _mm512_permutexvar_epi32(idx_swap_adj, H4p);  // swap adjacent within lanes
 
-    // Level 5: Distance 1 clean within each 4-element group
-    // Shuffle to compare adjacent elements
-    __m512i L4_shuf = _mm512_shuffle_epi32(L4, _MM_SHUFFLE(2,3,0,1));
-    __m512i H4_shuf = _mm512_shuffle_epi32(H4, _MM_SHUFFLE(2,3,0,1));
-    
-    __m512i L5_lo = _mm512_min_epu32(L4, L4_shuf);
-    __m512i L5_hi = _mm512_max_epu32(L4, L4_shuf);
-    *left = _mm512_mask_blend_epi32(_512_BLEND_1, L5_lo, L5_hi);
-    
-    __m512i H5_lo = _mm512_min_epu32(H4, H4_shuf);
-    __m512i H5_hi = _mm512_max_epu32(H4, H4_shuf);
-    *right = _mm512_mask_blend_epi32(_512_BLEND_1, H5_lo, H5_hi);
+    // Level 5 (128-bit Level 3): min/max + final shuffle/blend
+    __m512i L5 = _mm512_min_epu32(L4p, H4p);
+    __m512i H5 = _mm512_max_epu32(L4p, H4p);
+    // Shuffle H5 first (swap pairs), then blend, then final shuffles
+    __m512i H5_shuf = _mm512_permutexvar_epi32(idx_swap2_lane, H5);
+    __m512i L5p = _mm512_mask_blend_epi32(0xCCCC, L5, H5_shuf);  // pos 2,3 from H5_shuf
+    __m512i H5p = _mm512_mask_blend_epi32(0xCCCC, H5_shuf, L5);  // pos 2,3 from L5
+    // Final shuffle to get sorted order
+    *left = _mm512_permutexvar_epi32(idx_final_L, L5p);
+    *right = _mm512_permutexvar_epi32(idx_final_H, H5p);
 }
 
 // Public wrapper for odd-even merge
@@ -254,11 +257,14 @@ inline __attribute__((always_inline)) void merge_512_oddeven(
     __m512i *right
 ) {
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_oe_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_oe_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_oe_rev4 = _mm512_load_epi32(IDX_OE_REV4);
-    const __m512i idx_oe_swap2 = _mm512_load_epi32(IDX_OE_SWAP2);
-    merge_512_oddeven_inline(left, right, idx_rev, idx_oe_swap8, idx_oe_swap4, idx_oe_rev4, idx_oe_swap2);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
+    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
+    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
+    const __m512i idx_final_L = _mm512_load_epi32(IDX_OE_FINAL_L);
+    const __m512i idx_final_H = _mm512_load_epi32(IDX_OE_FINAL_H);
+    merge_512_oddeven_inline(left, right, idx_rev, idx_swap8, idx_swap4, 
+                             idx_swap2_lane, idx_swap_adj, idx_final_L, idx_final_H);
 }
 
 /*
@@ -271,96 +277,85 @@ static inline __attribute__((always_inline)) void merge_512_oddeven_inline_kv(
     __m512i *left_payload,
     __m512i *right_payload,
     const __m512i idx_rev,
-    const __m512i idx_oe_swap8,
-    const __m512i idx_oe_swap4,
-    const __m512i idx_oe_rev4,
-    const __m512i idx_oe_swap2
+    const __m512i idx_swap8,
+    const __m512i idx_swap4,
+    const __m512i idx_swap2_lane,
+    const __m512i idx_swap_adj,
+    const __m512i idx_final_L,
+    const __m512i idx_final_H
 ) {
     // Step 0: Reverse right registers
     *right_key = _mm512_permutexvar_epi32(idx_rev, *right_key);
     *right_payload = _mm512_permutexvar_epi32(idx_rev, *right_payload);
 
-    // Level 1: Distance 16 compare + odd/even interleave
+    // Level 1 (512-bit): min/max + interleave upper/lower halves
     __mmask16 cmp = _mm512_cmpgt_epu32_mask(*left_key, *right_key);
     __m512i L1_key = _mm512_mask_blend_epi32(cmp, *left_key, *right_key);
     __m512i H1_key = _mm512_mask_blend_epi32(cmp, *right_key, *left_key);
     __m512i L1_pay = _mm512_mask_blend_epi32(cmp, *left_payload, *right_payload);
     __m512i H1_pay = _mm512_mask_blend_epi32(cmp, *right_payload, *left_payload);
-    // Interleave
-    __m512i L1p_key = _mm512_mask_blend_epi32(_512_BLEND_1, L1_key, H1_key);
-    __m512i H1p_key = _mm512_mask_blend_epi32(_512_BLEND_1, H1_key, L1_key);
-    __m512i L1p_pay = _mm512_mask_blend_epi32(_512_BLEND_1, L1_pay, H1_pay);
-    __m512i H1p_pay = _mm512_mask_blend_epi32(_512_BLEND_1, H1_pay, L1_pay);
-    H1p_key = _mm512_permutexvar_epi32(idx_oe_swap8, H1p_key);
-    H1p_pay = _mm512_permutexvar_epi32(idx_oe_swap8, H1p_pay);
+    __m512i L1p_key = _mm512_mask_blend_epi32(0xFF00, L1_key, H1_key);
+    __m512i H1p_key = _mm512_mask_blend_epi32(0xFF00, H1_key, L1_key);
+    __m512i L1p_pay = _mm512_mask_blend_epi32(0xFF00, L1_pay, H1_pay);
+    __m512i H1p_pay = _mm512_mask_blend_epi32(0xFF00, H1_pay, L1_pay);
+    H1p_key = _mm512_permutexvar_epi32(idx_swap8, H1p_key);
+    H1p_pay = _mm512_permutexvar_epi32(idx_swap8, H1p_pay);
 
-    // Level 2: Distance 8 compare + interleave pairs
+    // Level 2 (512-bit): min/max + interleave groups of 4
     cmp = _mm512_cmpgt_epu32_mask(L1p_key, H1p_key);
     __m512i L2_key = _mm512_mask_blend_epi32(cmp, L1p_key, H1p_key);
     __m512i H2_key = _mm512_mask_blend_epi32(cmp, H1p_key, L1p_key);
     __m512i L2_pay = _mm512_mask_blend_epi32(cmp, L1p_pay, H1p_pay);
     __m512i H2_pay = _mm512_mask_blend_epi32(cmp, H1p_pay, L1p_pay);
-    __m512i L2p_key = _mm512_mask_blend_epi32(_512_BLEND_2, L2_key, H2_key);
-    __m512i H2p_key = _mm512_mask_blend_epi32(_512_BLEND_2, H2_key, L2_key);
-    __m512i L2p_pay = _mm512_mask_blend_epi32(_512_BLEND_2, L2_pay, H2_pay);
-    __m512i H2p_pay = _mm512_mask_blend_epi32(_512_BLEND_2, H2_pay, L2_pay);
-    H2p_key = _mm512_permutexvar_epi32(idx_oe_swap4, H2p_key);
-    H2p_pay = _mm512_permutexvar_epi32(idx_oe_swap4, H2p_pay);
+    __m512i L2p_key = _mm512_mask_blend_epi32(0xF0F0, L2_key, H2_key);
+    __m512i H2p_key = _mm512_mask_blend_epi32(0xF0F0, H2_key, L2_key);
+    __m512i L2p_pay = _mm512_mask_blend_epi32(0xF0F0, L2_pay, H2_pay);
+    __m512i H2p_pay = _mm512_mask_blend_epi32(0xF0F0, H2_pay, L2_pay);
+    H2p_key = _mm512_permutexvar_epi32(idx_swap4, H2p_key);
+    H2p_pay = _mm512_permutexvar_epi32(idx_swap4, H2p_pay);
 
-    // Level 3: Reverse within each 4-element group for bitonic merge
-    H2p_key = _mm512_permutexvar_epi32(idx_oe_rev4, H2p_key);
-    H2p_pay = _mm512_permutexvar_epi32(idx_oe_rev4, H2p_pay);
-    
-    // Compare-swap across 4-element groups
+    // Level 3 (128-bit Level 1): min/max + interleave pairs (0xCCCC)
     cmp = _mm512_cmpgt_epu32_mask(L2p_key, H2p_key);
     __m512i L3_key = _mm512_mask_blend_epi32(cmp, L2p_key, H2p_key);
     __m512i H3_key = _mm512_mask_blend_epi32(cmp, H2p_key, L2p_key);
     __m512i L3_pay = _mm512_mask_blend_epi32(cmp, L2p_pay, H2p_pay);
     __m512i H3_pay = _mm512_mask_blend_epi32(cmp, H2p_pay, L2p_pay);
+    __m512i L3p_key = _mm512_mask_blend_epi32(0xCCCC, L3_key, H3_key);
+    __m512i H3p_key = _mm512_mask_blend_epi32(0xCCCC, H3_key, L3_key);
+    __m512i L3p_pay = _mm512_mask_blend_epi32(0xCCCC, L3_pay, H3_pay);
+    __m512i H3p_pay = _mm512_mask_blend_epi32(0xCCCC, H3_pay, L3_pay);
+    H3p_key = _mm512_permutexvar_epi32(idx_swap2_lane, H3p_key);
+    H3p_pay = _mm512_permutexvar_epi32(idx_swap2_lane, H3p_pay);
 
-    // Level 4: Distance 2 clean within each 4-element group
-    __m512i L3_shuf_key = _mm512_permutexvar_epi32(idx_oe_swap2, L3_key);
-    __m512i H3_shuf_key = _mm512_permutexvar_epi32(idx_oe_swap2, H3_key);
-    __m512i L3_shuf_pay = _mm512_permutexvar_epi32(idx_oe_swap2, L3_pay);
-    __m512i H3_shuf_pay = _mm512_permutexvar_epi32(idx_oe_swap2, H3_pay);
-    
-    cmp = _mm512_cmpgt_epu32_mask(L3_key, L3_shuf_key);
-    __m512i L4_lo_key = _mm512_mask_blend_epi32(cmp, L3_key, L3_shuf_key);
-    __m512i L4_hi_key = _mm512_mask_blend_epi32(cmp, L3_shuf_key, L3_key);
-    __m512i L4_lo_pay = _mm512_mask_blend_epi32(cmp, L3_pay, L3_shuf_pay);
-    __m512i L4_hi_pay = _mm512_mask_blend_epi32(cmp, L3_shuf_pay, L3_pay);
-    __m512i L4_key = _mm512_mask_blend_epi32(_512_BLEND_2, L4_lo_key, L4_hi_key);
-    __m512i L4_pay = _mm512_mask_blend_epi32(_512_BLEND_2, L4_lo_pay, L4_hi_pay);
-    
-    cmp = _mm512_cmpgt_epu32_mask(H3_key, H3_shuf_key);
-    __m512i H4_lo_key = _mm512_mask_blend_epi32(cmp, H3_key, H3_shuf_key);
-    __m512i H4_hi_key = _mm512_mask_blend_epi32(cmp, H3_shuf_key, H3_key);
-    __m512i H4_lo_pay = _mm512_mask_blend_epi32(cmp, H3_pay, H3_shuf_pay);
-    __m512i H4_hi_pay = _mm512_mask_blend_epi32(cmp, H3_shuf_pay, H3_pay);
-    __m512i H4_key = _mm512_mask_blend_epi32(_512_BLEND_2, H4_lo_key, H4_hi_key);
-    __m512i H4_pay = _mm512_mask_blend_epi32(_512_BLEND_2, H4_lo_pay, H4_hi_pay);
+    // Level 4 (128-bit Level 2): min/max + interleave alternating (0xAAAA)
+    cmp = _mm512_cmpgt_epu32_mask(L3p_key, H3p_key);
+    __m512i L4_key = _mm512_mask_blend_epi32(cmp, L3p_key, H3p_key);
+    __m512i H4_key = _mm512_mask_blend_epi32(cmp, H3p_key, L3p_key);
+    __m512i L4_pay = _mm512_mask_blend_epi32(cmp, L3p_pay, H3p_pay);
+    __m512i H4_pay = _mm512_mask_blend_epi32(cmp, H3p_pay, L3p_pay);
+    __m512i L4p_key = _mm512_mask_blend_epi32(0xAAAA, L4_key, H4_key);
+    __m512i H4p_key = _mm512_mask_blend_epi32(0xAAAA, H4_key, L4_key);
+    __m512i L4p_pay = _mm512_mask_blend_epi32(0xAAAA, L4_pay, H4_pay);
+    __m512i H4p_pay = _mm512_mask_blend_epi32(0xAAAA, H4_pay, L4_pay);
+    H4p_key = _mm512_permutexvar_epi32(idx_swap_adj, H4p_key);
+    H4p_pay = _mm512_permutexvar_epi32(idx_swap_adj, H4p_pay);
 
-    // Level 5: Distance 1 clean
-    __m512i L4_shuf_key = _mm512_shuffle_epi32(L4_key, _MM_SHUFFLE(2,3,0,1));
-    __m512i H4_shuf_key = _mm512_shuffle_epi32(H4_key, _MM_SHUFFLE(2,3,0,1));
-    __m512i L4_shuf_pay = _mm512_shuffle_epi32(L4_pay, _MM_SHUFFLE(2,3,0,1));
-    __m512i H4_shuf_pay = _mm512_shuffle_epi32(H4_pay, _MM_SHUFFLE(2,3,0,1));
-    
-    cmp = _mm512_cmpgt_epu32_mask(L4_key, L4_shuf_key);
-    __m512i L5_lo_key = _mm512_mask_blend_epi32(cmp, L4_key, L4_shuf_key);
-    __m512i L5_hi_key = _mm512_mask_blend_epi32(cmp, L4_shuf_key, L4_key);
-    __m512i L5_lo_pay = _mm512_mask_blend_epi32(cmp, L4_pay, L4_shuf_pay);
-    __m512i L5_hi_pay = _mm512_mask_blend_epi32(cmp, L4_shuf_pay, L4_pay);
-    *left_key = _mm512_mask_blend_epi32(_512_BLEND_1, L5_lo_key, L5_hi_key);
-    *left_payload = _mm512_mask_blend_epi32(_512_BLEND_1, L5_lo_pay, L5_hi_pay);
-    
-    cmp = _mm512_cmpgt_epu32_mask(H4_key, H4_shuf_key);
-    __m512i H5_lo_key = _mm512_mask_blend_epi32(cmp, H4_key, H4_shuf_key);
-    __m512i H5_hi_key = _mm512_mask_blend_epi32(cmp, H4_shuf_key, H4_key);
-    __m512i H5_lo_pay = _mm512_mask_blend_epi32(cmp, H4_pay, H4_shuf_pay);
-    __m512i H5_hi_pay = _mm512_mask_blend_epi32(cmp, H4_shuf_pay, H4_pay);
-    *right_key = _mm512_mask_blend_epi32(_512_BLEND_1, H5_lo_key, H5_hi_key);
-    *right_payload = _mm512_mask_blend_epi32(_512_BLEND_1, H5_lo_pay, H5_hi_pay);
+    // Level 5 (128-bit Level 3): min/max + final shuffle/blend
+    cmp = _mm512_cmpgt_epu32_mask(L4p_key, H4p_key);
+    __m512i L5_key = _mm512_mask_blend_epi32(cmp, L4p_key, H4p_key);
+    __m512i H5_key = _mm512_mask_blend_epi32(cmp, H4p_key, L4p_key);
+    __m512i L5_pay = _mm512_mask_blend_epi32(cmp, L4p_pay, H4p_pay);
+    __m512i H5_pay = _mm512_mask_blend_epi32(cmp, H4p_pay, L4p_pay);
+    __m512i H5_shuf_key = _mm512_permutexvar_epi32(idx_swap2_lane, H5_key);
+    __m512i H5_shuf_pay = _mm512_permutexvar_epi32(idx_swap2_lane, H5_pay);
+    __m512i L5p_key = _mm512_mask_blend_epi32(0xCCCC, L5_key, H5_shuf_key);
+    __m512i H5p_key = _mm512_mask_blend_epi32(0xCCCC, H5_shuf_key, L5_key);
+    __m512i L5p_pay = _mm512_mask_blend_epi32(0xCCCC, L5_pay, H5_shuf_pay);
+    __m512i H5p_pay = _mm512_mask_blend_epi32(0xCCCC, H5_shuf_pay, L5_pay);
+    *left_key = _mm512_permutexvar_epi32(idx_final_L, L5p_key);
+    *right_key = _mm512_permutexvar_epi32(idx_final_H, H5p_key);
+    *left_payload = _mm512_permutexvar_epi32(idx_final_L, L5p_pay);
+    *right_payload = _mm512_permutexvar_epi32(idx_final_H, H5p_pay);
 }
 
 // Key-Value version: sorts payload alongside keys without using payload for comparison
