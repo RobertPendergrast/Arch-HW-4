@@ -1,5 +1,5 @@
-
-#include "sort_simd.h"
+// sorting.c, implements the improved simd sort
+#include "sorting.h"
 // Number of threads for OpenMP parallelization
 #define NUM_THREADS 16
 

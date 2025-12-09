@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "sort_simd.h"
+#include "sorting.h"
 #include "utils.h"
 
 int main(int argc, char *argv[]) {
