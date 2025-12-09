@@ -88,25 +88,6 @@ const int IDX_REV[16] __attribute__((aligned(64))) = {15,14,13,12,11,10,9,8,7,6,
 const int IDX_SWAP8[16] __attribute__((aligned(64))) = {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};
 const int IDX_SWAP4[16] __attribute__((aligned(64))) = {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};
 
-// Odd-even merge shuffle indices
-// Level 1-2 (512-bit scale)
-const int IDX_OE_SWAP8[16] __attribute__((aligned(64))) = {8,9,10,11,12,13,14,15,0,1,2,3,4,5,6,7};
-const int IDX_OE_SWAP4[16] __attribute__((aligned(64))) = {4,5,6,7,0,1,2,3,12,13,14,15,8,9,10,11};
-// Level 3-5 (128-bit scale, applied to all 4 lanes in parallel)
-// Swap pairs within each 128-bit lane: 0b01001110 = {2,3,0,1}
-const int IDX_OE_SWAP2_LANE[16] __attribute__((aligned(64))) = {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};
-// Swap adjacent within each 128-bit lane: 0b10110001 = {1,0,3,2}
-const int IDX_OE_SWAP_ADJ[16] __attribute__((aligned(64))) = {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};
-// Final two-source permute indices (for _mm512_permutex2var_epi32)
-// These interleave L5p (indices 0-15) and H5p (indices 16-31) to form final output
-// left = {L[0:3], H[0:3], L[4:7], H[4:7]}
-const int IDX_OE_FINAL_LEFT[16] __attribute__((aligned(64))) = {0,1,2,3, 16,17,18,19, 4,5,6,7, 20,21,22,23};
-// right = {L[8:11], H[8:11], L[12:15], H[12:15]}
-const int IDX_OE_FINAL_RIGHT[16] __attribute__((aligned(64))) = {8,9,10,11, 24,25,26,27, 12,13,14,15, 28,29,30,31};
-// Legacy indices (kept for compatibility with old code)
-const int IDX_OE_REV4[16] __attribute__((aligned(64))) = {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};
-const int IDX_OE_SWAP2[16] __attribute__((aligned(64))) = {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};
-
 // Inline version that accepts pre-loaded indices to avoid repeated memory loads
 static inline __attribute__((always_inline)) void merge_512_inline(
     __m512i *left,
@@ -182,187 +163,6 @@ inline __attribute__((always_inline)) void merge_512_registers(
     const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
     const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
     merge_512_inline(left, right, idx_rev, idx_swap8, idx_swap4);
-}
-
-/*
- * ALTERNATIVE: Odd-Even Merge Network (Pure 512-bit)
- * 
- * Based on the working 128-bit implementation, extended to 512-bit.
- * Structure:
- *   Level 1-2: 512-bit scale interleave (halves, then groups of 4)
- *   Level 3-5: 128-bit scale interleave (4 parallel 128-bit merges)
- * 
- * Blend masks:
- *   Level 1: 0xFF00 (upper 8 from H)
- *   Level 2: 0xF0F0 (groups of 4 from H)
- *   Level 3: 0xCCCC (0b1100 per 128-bit lane)
- *   Level 4: 0xAAAA (0b1010 per 128-bit lane)
- *   Level 5: 0xCCCC (0b1100 per 128-bit lane)
- */
-static inline __attribute__((always_inline)) void merge_512_oddeven_inline(
-    __m512i *left,
-    __m512i *right,
-    const __m512i idx_rev,
-    const __m512i idx_swap8,
-    const __m512i idx_swap4,
-    const __m512i idx_swap2_lane,
-    const __m512i idx_swap_adj,
-    const __m512i idx_final_left,
-    const __m512i idx_final_right
-) {
-    // Step 0: Reverse right register
-    *right = _mm512_permutexvar_epi32(idx_rev, *right);
-
-    // Level 1 (512-bit): min/max + interleave upper/lower halves
-    __m512i L1 = _mm512_min_epu32(*left, *right);
-    __m512i H1 = _mm512_max_epu32(*left, *right);
-    __m512i L1p = _mm512_mask_blend_epi32(0xFF00, L1, H1);  // upper 8 from H1
-    __m512i H1p = _mm512_mask_blend_epi32(0xFF00, H1, L1);  // upper 8 from L1
-    H1p = _mm512_permutexvar_epi32(idx_swap8, H1p);  // swap halves
-
-    // Level 2 (512-bit): min/max + interleave groups of 4
-    __m512i L2 = _mm512_min_epu32(L1p, H1p);
-    __m512i H2 = _mm512_max_epu32(L1p, H1p);
-    __m512i L2p = _mm512_mask_blend_epi32(0xF0F0, L2, H2);  // groups of 4 from H2
-    __m512i H2p = _mm512_mask_blend_epi32(0xF0F0, H2, L2);  // groups of 4 from L2
-    H2p = _mm512_permutexvar_epi32(idx_swap4, H2p);  // swap 4-groups within halves
-
-    // Level 3 (128-bit Level 1): min/max + interleave pairs (0b1100 per lane)
-    __m512i L3 = _mm512_min_epu32(L2p, H2p);
-    __m512i H3 = _mm512_max_epu32(L2p, H2p);
-    __m512i L3p = _mm512_mask_blend_epi32(0xCCCC, L3, H3);  // pos 2,3 from H3 per lane
-    __m512i H3p = _mm512_mask_blend_epi32(0xCCCC, H3, L3);  // pos 2,3 from L3 per lane
-    H3p = _mm512_permutexvar_epi32(idx_swap2_lane, H3p);  // swap pairs within lanes
-
-    // Level 4 (128-bit Level 2): min/max + interleave alternating (0b1010 per lane)
-    __m512i L4 = _mm512_min_epu32(L3p, H3p);
-    __m512i H4 = _mm512_max_epu32(L3p, H3p);
-    __m512i L4p = _mm512_mask_blend_epi32(0xAAAA, L4, H4);  // pos 1,3 from H4 per lane
-    __m512i H4p = _mm512_mask_blend_epi32(0xAAAA, H4, L4);  // pos 1,3 from L4 per lane
-    H4p = _mm512_permutexvar_epi32(idx_swap_adj, H4p);  // swap adjacent within lanes
-
-    // Level 5 (128-bit Level 3): min/max + final shuffle/blend
-    __m512i L5 = _mm512_min_epu32(L4p, H4p);
-    __m512i H5 = _mm512_max_epu32(L4p, H4p);
-    // Shuffle H5 first (swap pairs), then blend
-    __m512i H5_shuf = _mm512_permutexvar_epi32(idx_swap2_lane, H5);
-    __m512i L5p = _mm512_mask_blend_epi32(0xCCCC, L5, H5_shuf);  // pos 2,3 from H5_shuf
-    __m512i H5p = _mm512_mask_blend_epi32(0xCCCC, H5_shuf, L5);  // pos 2,3 from L5
-    
-    // Final assembly: interleave L5p and H5p across registers using two-source permute
-    // left = {L5p[0:3], H5p[0:3], L5p[4:7], H5p[4:7]}
-    // right = {L5p[8:11], H5p[8:11], L5p[12:15], H5p[12:15]}
-    *left = _mm512_permutex2var_epi32(L5p, idx_final_left, H5p);
-    *right = _mm512_permutex2var_epi32(L5p, idx_final_right, H5p);
-}
-
-// Public wrapper for odd-even merge
-inline __attribute__((always_inline)) void merge_512_oddeven(
-    __m512i *left,
-    __m512i *right
-) {
-    const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFTEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
-    merge_512_oddeven_inline(left, right, idx_rev, idx_swap8, idx_swap4, 
-                             idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
-}
-
-/*
- * Odd-Even Merge Network - Key-Value version
- * Sorts payload alongside keys using comparison masks.
- */
-static inline __attribute__((always_inline)) void merge_512_oddeven_inline_kv(
-    __m512i *left_key,
-    __m512i *right_key,
-    __m512i *left_payload,
-    __m512i *right_payload,
-    const __m512i idx_rev,
-    const __m512i idx_swap8,
-    const __m512i idx_swap4,
-    const __m512i idx_swap2_lane,
-    const __m512i idx_swap_adj,
-    const __m512i idx_final_left,
-    const __m512i idx_final_right
-) {
-    // Step 0: Reverse right registers
-    *right_key = _mm512_permutexvar_epi32(idx_rev, *right_key);
-    *right_payload = _mm512_permutexvar_epi32(idx_rev, *right_payload);
-
-    // Level 1 (512-bit): min/max + interleave upper/lower halves
-    __mmask16 cmp = _mm512_cmpgt_epu32_mask(*left_key, *right_key);
-    __m512i L1_key = _mm512_mask_blend_epi32(cmp, *left_key, *right_key);
-    __m512i H1_key = _mm512_mask_blend_epi32(cmp, *right_key, *left_key);
-    __m512i L1_pay = _mm512_mask_blend_epi32(cmp, *left_payload, *right_payload);
-    __m512i H1_pay = _mm512_mask_blend_epi32(cmp, *right_payload, *left_payload);
-    __m512i L1p_key = _mm512_mask_blend_epi32(0xFF00, L1_key, H1_key);
-    __m512i H1p_key = _mm512_mask_blend_epi32(0xFF00, H1_key, L1_key);
-    __m512i L1p_pay = _mm512_mask_blend_epi32(0xFF00, L1_pay, H1_pay);
-    __m512i H1p_pay = _mm512_mask_blend_epi32(0xFF00, H1_pay, L1_pay);
-    H1p_key = _mm512_permutexvar_epi32(idx_swap8, H1p_key);
-    H1p_pay = _mm512_permutexvar_epi32(idx_swap8, H1p_pay);
-
-    // Level 2 (512-bit): min/max + interleave groups of 4
-    cmp = _mm512_cmpgt_epu32_mask(L1p_key, H1p_key);
-    __m512i L2_key = _mm512_mask_blend_epi32(cmp, L1p_key, H1p_key);
-    __m512i H2_key = _mm512_mask_blend_epi32(cmp, H1p_key, L1p_key);
-    __m512i L2_pay = _mm512_mask_blend_epi32(cmp, L1p_pay, H1p_pay);
-    __m512i H2_pay = _mm512_mask_blend_epi32(cmp, H1p_pay, L1p_pay);
-    __m512i L2p_key = _mm512_mask_blend_epi32(0xF0F0, L2_key, H2_key);
-    __m512i H2p_key = _mm512_mask_blend_epi32(0xF0F0, H2_key, L2_key);
-    __m512i L2p_pay = _mm512_mask_blend_epi32(0xF0F0, L2_pay, H2_pay);
-    __m512i H2p_pay = _mm512_mask_blend_epi32(0xF0F0, H2_pay, L2_pay);
-    H2p_key = _mm512_permutexvar_epi32(idx_swap4, H2p_key);
-    H2p_pay = _mm512_permutexvar_epi32(idx_swap4, H2p_pay);
-
-    // Level 3 (128-bit Level 1): min/max + interleave pairs (0xCCCC)
-    cmp = _mm512_cmpgt_epu32_mask(L2p_key, H2p_key);
-    __m512i L3_key = _mm512_mask_blend_epi32(cmp, L2p_key, H2p_key);
-    __m512i H3_key = _mm512_mask_blend_epi32(cmp, H2p_key, L2p_key);
-    __m512i L3_pay = _mm512_mask_blend_epi32(cmp, L2p_pay, H2p_pay);
-    __m512i H3_pay = _mm512_mask_blend_epi32(cmp, H2p_pay, L2p_pay);
-    __m512i L3p_key = _mm512_mask_blend_epi32(0xCCCC, L3_key, H3_key);
-    __m512i H3p_key = _mm512_mask_blend_epi32(0xCCCC, H3_key, L3_key);
-    __m512i L3p_pay = _mm512_mask_blend_epi32(0xCCCC, L3_pay, H3_pay);
-    __m512i H3p_pay = _mm512_mask_blend_epi32(0xCCCC, H3_pay, L3_pay);
-    H3p_key = _mm512_permutexvar_epi32(idx_swap2_lane, H3p_key);
-    H3p_pay = _mm512_permutexvar_epi32(idx_swap2_lane, H3p_pay);
-
-    // Level 4 (128-bit Level 2): min/max + interleave alternating (0xAAAA)
-    cmp = _mm512_cmpgt_epu32_mask(L3p_key, H3p_key);
-    __m512i L4_key = _mm512_mask_blend_epi32(cmp, L3p_key, H3p_key);
-    __m512i H4_key = _mm512_mask_blend_epi32(cmp, H3p_key, L3p_key);
-    __m512i L4_pay = _mm512_mask_blend_epi32(cmp, L3p_pay, H3p_pay);
-    __m512i H4_pay = _mm512_mask_blend_epi32(cmp, H3p_pay, L3p_pay);
-    __m512i L4p_key = _mm512_mask_blend_epi32(0xAAAA, L4_key, H4_key);
-    __m512i H4p_key = _mm512_mask_blend_epi32(0xAAAA, H4_key, L4_key);
-    __m512i L4p_pay = _mm512_mask_blend_epi32(0xAAAA, L4_pay, H4_pay);
-    __m512i H4p_pay = _mm512_mask_blend_epi32(0xAAAA, H4_pay, L4_pay);
-    H4p_key = _mm512_permutexvar_epi32(idx_swap_adj, H4p_key);
-    H4p_pay = _mm512_permutexvar_epi32(idx_swap_adj, H4p_pay);
-
-    // Level 5 (128-bit Level 3): min/max + final shuffle/blend
-    cmp = _mm512_cmpgt_epu32_mask(L4p_key, H4p_key);
-    __m512i L5_key = _mm512_mask_blend_epi32(cmp, L4p_key, H4p_key);
-    __m512i H5_key = _mm512_mask_blend_epi32(cmp, H4p_key, L4p_key);
-    __m512i L5_pay = _mm512_mask_blend_epi32(cmp, L4p_pay, H4p_pay);
-    __m512i H5_pay = _mm512_mask_blend_epi32(cmp, H4p_pay, L4p_pay);
-    __m512i H5_shuf_key = _mm512_permutexvar_epi32(idx_swap2_lane, H5_key);
-    __m512i H5_shuf_pay = _mm512_permutexvar_epi32(idx_swap2_lane, H5_pay);
-    __m512i L5p_key = _mm512_mask_blend_epi32(0xCCCC, L5_key, H5_shuf_key);
-    __m512i H5p_key = _mm512_mask_blend_epi32(0xCCCC, H5_shuf_key, L5_key);
-    __m512i L5p_pay = _mm512_mask_blend_epi32(0xCCCC, L5_pay, H5_shuf_pay);
-    __m512i H5p_pay = _mm512_mask_blend_epi32(0xCCCC, H5_shuf_pay, L5_pay);
-    
-    // Final assembly: interleave L5p and H5p across registers using two-source permute
-    *left_key = _mm512_permutex2var_epi32(L5p_key, idx_final_left, H5p_key);
-    *right_key = _mm512_permutex2var_epi32(L5p_key, idx_final_right, H5p_key);
-    *left_payload = _mm512_permutex2var_epi32(L5p_pay, idx_final_left, H5p_pay);
-    *right_payload = _mm512_permutex2var_epi32(L5p_pay, idx_final_right, H5p_pay);
 }
 
 // Key-Value version: sorts payload alongside keys without using payload for comparison
@@ -550,19 +350,15 @@ void merge_arrays_cached(
         return;
     }
 
-    // OPTIMIZATION: Load shuffle indices ONCE before the loop (odd-even merge)
+    // OPTIMIZATION: Load shuffle indices ONCE before the loop (bitonic merge)
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
     // Load from left and right arrays (aligned for cache efficiency)
     __m512i left_reg = _mm512_load_epi32((__m512i*) left);
     __m512i right_reg = _mm512_load_epi32((__m512i*) right);
-    merge_512_oddeven_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+    merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
     // REGULAR STORE: keeps data in cache for next merge pass
     _mm512_store_epi32(arr, left_reg);
     
@@ -590,7 +386,7 @@ void merge_arrays_cached(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        merge_512_oddeven_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+        merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
         // REGULAR STORE: keeps data in L3 cache
         _mm512_store_epi32(arr + left_idx + right_idx - 32, left_reg);
     }
@@ -639,19 +435,15 @@ void merge_arrays(
         return;
     }
 
-    // OPTIMIZATION: Load shuffle indices ONCE before the loop (odd-even merge)
+    // OPTIMIZATION: Load shuffle indices ONCE before the loop (bitonic merge)
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
     // Load from left and right arrays (aligned for cache efficiency)
     __m512i left_reg = _mm512_load_epi32((__m512i*) left);
     __m512i right_reg = _mm512_load_epi32((__m512i*) right);
-    merge_512_oddeven_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+    merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
     // STREAMING STORE: bypasses cache since output won't be read until next merge pass
     _mm512_stream_si512((__m512i*)arr, left_reg);
     
@@ -681,8 +473,8 @@ void merge_arrays(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        // Use inline version with pre-loaded indices (odd-even merge)
-        merge_512_oddeven_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+        // Use inline version with pre-loaded indices (bitonic merge)
+        merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
         // STREAMING STORE: bypasses cache for better memory bandwidth
         _mm512_stream_si512((__m512i*)(arr + left_idx + right_idx - 32), left_reg);
     }
@@ -789,19 +581,15 @@ void merge_arrays_unaligned(
     }
     
     // ===== ALIGNED SIMD MERGE WITH STREAMING STORES =====
-    // Load shuffle indices ONCE before the loop (odd-even merge)
+    // Load shuffle indices ONCE before the loop (bitonic merge)
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
     // UNALIGNED loads from left and right (inputs may be at arbitrary offsets)
     __m512i left_reg = _mm512_loadu_epi32(left + left_idx);
     __m512i right_reg = _mm512_loadu_epi32(right + right_idx);
-    merge_512_oddeven_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+    merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
     
     // Output is now aligned - use streaming store!
     _mm512_stream_si512((__m512i*)(arr + out_idx), left_reg);
@@ -826,7 +614,7 @@ void merge_arrays_unaligned(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        merge_512_oddeven_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+        merge_512_inline(&left_reg, &right_reg, idx_rev, idx_swap8, idx_swap4);
         
         // STREAMING STORE - output is aligned!
         _mm512_stream_si512((__m512i*)(arr + out_idx), left_reg);
@@ -889,14 +677,10 @@ void merge_arrays_cached_kv(
         return;
     }
 
-    // OPTIMIZATION: Load shuffle indices ONCE before the loop (odd-even merge)
+    // OPTIMIZATION: Load shuffle indices ONCE before the loop (bitonic merge)
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
     // Load from left and right arrays (aligned for cache efficiency)
     __m512i left_key_reg = _mm512_load_epi32((__m512i*) left_key);
@@ -904,8 +688,8 @@ void merge_arrays_cached_kv(
     __m512i left_pay_reg = _mm512_load_epi32((__m512i*) left_payload);
     __m512i right_pay_reg = _mm512_load_epi32((__m512i*) right_payload);
     
-    merge_512_oddeven_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
-                                idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+    merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                        idx_rev, idx_swap8, idx_swap4);
     
     // REGULAR STORE: keeps data in cache for next merge pass
     _mm512_store_epi32(arr_key, left_key_reg);
@@ -940,8 +724,8 @@ void merge_arrays_cached_kv(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        merge_512_oddeven_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
-                                    idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+        merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                            idx_rev, idx_swap8, idx_swap4);
         
         // REGULAR STORE: keeps data in L3 cache
         _mm512_store_epi32(arr_key + left_idx + right_idx - 32, left_key_reg);
@@ -1007,14 +791,10 @@ void merge_arrays_kv(
         return;
     }
 
-    // OPTIMIZATION: Load shuffle indices ONCE before the loop (odd-even merge)
+    // OPTIMIZATION: Load shuffle indices ONCE before the loop (bitonic merge)
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
     // Load from left and right arrays (aligned for cache efficiency)
     __m512i left_key_reg = _mm512_load_epi32((__m512i*) left_key);
@@ -1022,8 +802,8 @@ void merge_arrays_kv(
     __m512i left_pay_reg = _mm512_load_epi32((__m512i*) left_payload);
     __m512i right_pay_reg = _mm512_load_epi32((__m512i*) right_payload);
     
-    merge_512_oddeven_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
-                                idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+    merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                        idx_rev, idx_swap8, idx_swap4);
     
     // STREAMING STORE: bypasses cache since output won't be read until next merge pass
     _mm512_stream_si512((__m512i*)arr_key, left_key_reg);
@@ -1058,8 +838,8 @@ void merge_arrays_kv(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        merge_512_oddeven_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
-                                    idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+        merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                            idx_rev, idx_swap8, idx_swap4);
         
         // STREAMING STORE: bypasses cache for better memory bandwidth
         _mm512_stream_si512((__m512i*)(arr_key + left_idx + right_idx - 32), left_key_reg);
@@ -1185,14 +965,10 @@ void merge_arrays_unaligned_kv(
     }
     
     // ===== ALIGNED SIMD MERGE WITH STREAMING STORES =====
-    // Load shuffle indices ONCE before the loop (odd-even merge)
+    // Load shuffle indices ONCE before the loop (bitonic merge)
     const __m512i idx_rev = _mm512_load_epi32(IDX_REV);
-    const __m512i idx_swap8 = _mm512_load_epi32(IDX_OE_SWAP8);
-    const __m512i idx_swap4 = _mm512_load_epi32(IDX_OE_SWAP4);
-    const __m512i idx_swap2_lane = _mm512_load_epi32(IDX_OE_SWAP2_LANE);
-    const __m512i idx_swap_adj = _mm512_load_epi32(IDX_OE_SWAP_ADJ);
-    const __m512i idx_final_left = _mm512_load_epi32(IDX_OE_FINAL_LEFT);
-    const __m512i idx_final_right = _mm512_load_epi32(IDX_OE_FINAL_RIGHT);
+    const __m512i idx_swap8 = _mm512_load_epi32(IDX_SWAP8);
+    const __m512i idx_swap4 = _mm512_load_epi32(IDX_SWAP4);
 
     // UNALIGNED loads from left and right (inputs may be at arbitrary offsets)
     __m512i left_key_reg = _mm512_loadu_epi32(left_key + left_idx);
@@ -1200,8 +976,8 @@ void merge_arrays_unaligned_kv(
     __m512i left_pay_reg = _mm512_loadu_epi32(left_payload + left_idx);
     __m512i right_pay_reg = _mm512_loadu_epi32(right_payload + right_idx);
     
-    merge_512_oddeven_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
-                                idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+    merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                        idx_rev, idx_swap8, idx_swap4);
     
     // Output is now aligned - use streaming store!
     _mm512_stream_si512((__m512i*)(arr_key + out_idx), left_key_reg);
@@ -1232,8 +1008,8 @@ void merge_arrays_unaligned_kv(
         left_idx += take_left * 16;
         right_idx += (!take_left) * 16;
         
-        merge_512_oddeven_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
-                                    idx_rev, idx_swap8, idx_swap4, idx_swap2_lane, idx_swap_adj, idx_final_left, idx_final_right);
+        merge_512_inline_kv(&left_key_reg, &right_key_reg, &left_pay_reg, &right_pay_reg,
+                            idx_rev, idx_swap8, idx_swap4);
         
         // STREAMING STORE - output is aligned!
         _mm512_stream_si512((__m512i*)(arr_key + out_idx), left_key_reg);
