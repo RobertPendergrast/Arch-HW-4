@@ -24,8 +24,6 @@ extern const int IDX_OE_SWAP2_LANE[16];
 extern const int IDX_OE_SWAP_ADJ[16];
 extern const int IDX_OE_FINAL_LEFT[16];
 extern const int IDX_OE_FINAL_RIGHT[16];
-extern const int IDX_OE_FINAL_L[16];
-extern const int IDX_OE_FINAL_H[16];
 extern const int IDX_OE_REV4[16];
 extern const int IDX_OE_SWAP2[16];
 

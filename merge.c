@@ -100,12 +100,10 @@ const int IDX_OE_SWAP_ADJ[16] __attribute__((aligned(64))) = {1,0,3,2,5,4,7,6,9,
 // Final two-source permute indices (for _mm512_permutex2var_epi32)
 // These interleave L5p (indices 0-15) and H5p (indices 16-31) to form final output
 // left = {L[0:3], H[0:3], L[4:7], H[4:7]}
-const int IDX_OE_FINAL_LEFTEFT[16] __attribute__((aligned(64))) = {0,1,2,3, 16,17,18,19, 4,5,6,7, 20,21,22,23};
+const int IDX_OE_FINAL_LEFT[16] __attribute__((aligned(64))) = {0,1,2,3, 16,17,18,19, 4,5,6,7, 20,21,22,23};
 // right = {L[8:11], H[8:11], L[12:15], H[12:15]}
 const int IDX_OE_FINAL_RIGHT[16] __attribute__((aligned(64))) = {8,9,10,11, 24,25,26,27, 12,13,14,15, 28,29,30,31};
-// Legacy indices (kept for compatibility)
-const int IDX_OE_FINAL_LEFT[16] __attribute__((aligned(64))) = {0,2,1,3,4,6,5,7,8,10,9,11,12,14,13,15};
-const int IDX_OE_FINAL_RIGHT[16] __attribute__((aligned(64))) = {2,0,3,1,6,4,7,5,10,8,11,9,14,12,15,13};
+// Legacy indices (kept for compatibility with old code)
 const int IDX_OE_REV4[16] __attribute__((aligned(64))) = {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};
 const int IDX_OE_SWAP2[16] __attribute__((aligned(64))) = {2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13};
 
