@@ -3,7 +3,7 @@
 # Unified Benchmark Script for Merge Sort Implementations
 # ============================================
 # Tests 4 sorting algorithms across multiple data distributions
-# with 1 billion elements, cleaning up data files after each test.
+# and array sizes, cleaning up data files after each test.
 #
 # Algorithms:
 #   1. sorting        - Base merge sort (single-threaded, no optimizations)
@@ -13,12 +13,15 @@
 #
 # Distributions:
 #   uniform, normal, pareto, sorted, reverse, nearly
+#
+# Sizes:
+#   1k, 10k, 100k, 1M, 10M, 100M, 1B elements
 # ============================================
 
 set -e  # Exit on error
 
 # Configuration
-SIZE=2500000000  # 1 billion elements (~4GB data file)
+SIZES=(1000 10000 100000 1000000 10000000 100000000 1000000000)
 DISTRIBUTIONS=("uniform" "normal" "pareto" "sorted" "reverse" "nearly")
 
 # Algorithm commands (some with thread count argument)
@@ -26,7 +29,7 @@ ALGORITHM_CMDS=("./sorting" "./sort_no_simd" "./sort_no_simd" "./sort_simd")
 ALGORITHM_ARGS=("" "1" "16" "")  # Thread count for sort_no_simd variants
 ALGORITHM_NAMES=("Base" "Cache-Optimized" "Multithreaded" "SIMD")
 RESULTS_FILE="benchmark_results.csv"
-OUTPUT_DIR="/mnt/data"
+OUTPUT_DIR="."
 TEMP_OUTPUT="/dev/null"  # Don't write output - saves ~4GB I/O per test
 
 # Create output directory
@@ -44,13 +47,14 @@ echo -e "${BLUE}   Merge Sort Benchmark Suite${NC}"
 echo -e "${BLUE}============================================${NC}"
 echo ""
 echo "Configuration:"
-echo "  Array size: $(printf "%'d" $SIZE) elements (~$((SIZE * 4 / 1024 / 1024 / 1024)) GB)"
+echo "  Array sizes: ${SIZES[*]} elements"
 echo "  Algorithms:"
 echo "    - Base:           sorting (single-threaded)"
 echo "    - Cache-Optimized: sort_no_simd with 1 thread"
 echo "    - Multithreaded:  sort_no_simd with 16 threads"
 echo "    - SIMD:           sort_simd (16 threads + AVX-512)"
 echo "  Distributions: ${DISTRIBUTIONS[*]}"
+echo "  Total tests: $((${#SIZES[@]} * ${#DISTRIBUTIONS[@]} * ${#ALGORITHM_NAMES[@]}))"
 echo ""
 
 # Build required executables
@@ -59,15 +63,16 @@ make sorting sort_no_simd sort_simd
 echo ""
 
 # Initialize results CSV
-echo "distribution,algorithm,algorithm_name,time_seconds,status" > "$RESULTS_FILE"
+echo "distribution,size,algorithm,algorithm_name,time_seconds,status" > "$RESULTS_FILE"
 
 # Function to run a single benchmark
 run_benchmark() {
     local dist=$1
-    local algo_cmd=$2
-    local algo_args=$3
-    local algo_name=$4
-    local data_file="$OUTPUT_DIR/${dist}_${SIZE}.bin"
+    local size=$2
+    local algo_cmd=$3
+    local algo_args=$4
+    local algo_name=$5
+    local data_file="$OUTPUT_DIR/${dist}_${size}.bin"
     
     echo -e "  Running ${BLUE}${algo_name}${NC}..."
     
@@ -94,10 +99,10 @@ run_benchmark() {
         # Check if sorting was successful
         if grep -q "sorted successfully" /tmp/sort_stdout.txt; then
             echo -e "    ${GREEN}✓${NC} ${sort_time}s"
-            echo "${dist},${algo_name},${algo_name},${sort_time},OK" >> "$RESULTS_FILE"
+            echo "${dist},${size},${algo_name},${algo_name},${sort_time},OK" >> "$RESULTS_FILE"
         else
             echo -e "    ${RED}✗${NC} Sorting failed (verification error)"
-            echo "${dist},${algo_name},${algo_name},,VERIFY_FAIL" >> "$RESULTS_FILE"
+            echo "${dist},${size},${algo_name},${algo_name},,VERIFY_FAIL" >> "$RESULTS_FILE"
         fi
     else
         echo -e "    ${RED}✗${NC} Error (exit code: $?)"
@@ -105,7 +110,7 @@ run_benchmark() {
         if [ -s /tmp/sort_stdout.txt ]; then
             echo "    Output: $(head -3 /tmp/sort_stdout.txt)"
         fi
-        echo "${dist},${algo_name},${algo_name},,ERROR" >> "$RESULTS_FILE"
+        echo "${dist},${size},${algo_name},${algo_name},,ERROR" >> "$RESULTS_FILE"
     fi
     
     # Clean up temp output (skip if /dev/null)
@@ -115,7 +120,7 @@ run_benchmark() {
 }
 
 # Main benchmark loop
-total_tests=$((${#DISTRIBUTIONS[@]} * ${#ALGORITHM_NAMES[@]}))
+total_tests=$((${#DISTRIBUTIONS[@]} * ${#SIZES[@]} * ${#ALGORITHM_NAMES[@]}))
 current_test=0
 
 for dist in "${DISTRIBUTIONS[@]}"; do
@@ -124,41 +129,62 @@ for dist in "${DISTRIBUTIONS[@]}"; do
     echo -e "${YELLOW}Distribution: ${dist^^}${NC}"
     echo -e "${YELLOW}============================================${NC}"
     
-    data_file="$OUTPUT_DIR/${dist}_${SIZE}.bin"
-    
-    # Generate data if it doesn't exist
-    if [ ! -f "$data_file" ]; then
-        echo -e "Generating ${dist} data (${SIZE} elements)..."
-        python3 generate_data.py "$SIZE" "$dist"
+    for size in "${SIZES[@]}"; do
         echo ""
-    else
-        file_size=$(stat -c%s "$data_file" 2>/dev/null || echo 0)
-        expected_size=$((8 + SIZE * 4))  # 8-byte header + 4 bytes per element
-        if [ "$file_size" -ne "$expected_size" ]; then
-            echo -e "Data file size mismatch, regenerating..."
-            rm -f "$data_file"
-            python3 generate_data.py "$SIZE" "$dist"
-            echo ""
-        else
-            echo "Using existing data file: $data_file"
-        fi
-    fi
-    
-    # Run each algorithm on this distribution
-    for i in "${!ALGORITHM_NAMES[@]}"; do
-        algo_cmd="${ALGORITHM_CMDS[$i]}"
-        algo_args="${ALGORITHM_ARGS[$i]}"
-        algo_name="${ALGORITHM_NAMES[$i]}"
-        current_test=$((current_test + 1))
+        echo -e "${BLUE}--- Size: $(printf "%'d" $size) elements ---${NC}"
         
-        echo -e "[$current_test/$total_tests] ${algo_name}"
-        run_benchmark "$dist" "$algo_cmd" "$algo_args" "$algo_name"
+        data_file="$OUTPUT_DIR/${dist}_${size}.bin"
+        # Also check datasets/ directory (where generate_data.py might output)
+        datasets_file="datasets/${dist}_${size}.bin"
+        
+        # Generate data if it doesn't exist in either location
+        if [ ! -f "$data_file" ] && [ ! -f "$datasets_file" ]; then
+            echo -e "Generating ${dist} data (${size} elements)..."
+            python3 generate_data.py "$size" "$dist"
+            # If generate_data.py outputs to datasets/, copy to OUTPUT_DIR
+            if [ -f "$datasets_file" ] && [ "$OUTPUT_DIR" != "datasets" ]; then
+                mkdir -p "$OUTPUT_DIR"
+                cp "$datasets_file" "$data_file"
+            fi
+        else
+            # Use existing file (prefer OUTPUT_DIR, fallback to datasets/)
+            if [ -f "$data_file" ]; then
+                file_size=$(stat -c%s "$data_file" 2>/dev/null || echo 0)
+                expected_size=$((8 + size * 4))  # 8-byte header + 4 bytes per element
+                if [ "$file_size" -ne "$expected_size" ]; then
+                    echo -e "Data file size mismatch, regenerating..."
+                    rm -f "$data_file"
+                    python3 generate_data.py "$size" "$dist"
+                    if [ -f "$datasets_file" ] && [ "$OUTPUT_DIR" != "datasets" ]; then
+                        cp "$datasets_file" "$data_file"
+                    fi
+                else
+                    echo "Using existing data file: $data_file"
+                fi
+            elif [ -f "$datasets_file" ]; then
+                # Copy from datasets/ to OUTPUT_DIR
+                mkdir -p "$OUTPUT_DIR"
+                cp "$datasets_file" "$data_file"
+                echo "Copied data file from datasets/ to $data_file"
+            fi
+        fi
+        
+        # Run each algorithm on this distribution and size
+        for i in "${!ALGORITHM_NAMES[@]}"; do
+            algo_cmd="${ALGORITHM_CMDS[$i]}"
+            algo_args="${ALGORITHM_ARGS[$i]}"
+            algo_name="${ALGORITHM_NAMES[$i]}"
+            current_test=$((current_test + 1))
+            
+            echo -e "[$current_test/$total_tests] ${algo_name}"
+            run_benchmark "$dist" "$size" "$algo_cmd" "$algo_args" "$algo_name"
+        done
+        
+        # Delete the data file to save space (after all algorithms tested)
+        echo ""
+        echo -e "${YELLOW}Cleaning up: Removing $data_file to save storage...${NC}"
+        rm -f "$data_file"
     done
-    
-    # Delete the data file to save space
-    echo ""
-    echo -e "${YELLOW}Cleaning up: Removing $data_file to save storage...${NC}"
-    rm -f "$data_file"
 done
 
 echo ""
@@ -181,3 +207,4 @@ python3 plot_benchmark_results.py
 
 echo ""
 echo -e "${GREEN}Done! Check the generated PNG files for visualizations.${NC}"
+

@@ -417,12 +417,25 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
     }
     
     // Handle remainder (single thread, small work)
-    if (remainder_start + 32 <= chunk_size) {
-        sort_32_simd(arr + remainder_start);
-        remainder_start += 32;
-    }
-    if (remainder_start < chunk_size) {
-        insertion_sort(arr + remainder_start, chunk_size - remainder_start);
+    // Must produce a SINGLE sorted run for the merge phase
+    size_t remainder_size = chunk_size - remainder_start;
+    if (remainder_size > 0) {
+        if (remainder_size >= 32 && remainder_size < 64) {
+            // Sort first 32 with SIMD, rest with insertion, then merge
+            sort_32_simd(arr + remainder_start);
+            if (remainder_size > 32) {
+                insertion_sort(arr + remainder_start + 32, remainder_size - 32);
+                // Merge the two portions in-place using temp buffer
+                uint32_t temp_remainder[64] __attribute__((aligned(64)));
+                merge_arrays_unaligned(arr + remainder_start, 32,
+                                       arr + remainder_start + 32, remainder_size - 32,
+                                       temp_remainder);
+                memcpy(arr + remainder_start, temp_remainder, remainder_size * sizeof(uint32_t));
+            }
+        } else {
+            // Small remainder - just use insertion sort
+            insertion_sort(arr + remainder_start, remainder_size);
+        }
     }
     
     // Step 2: Merge passes within this chunk
@@ -448,13 +461,15 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                     memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
                 } else {
                     size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-                    merge_arrays(src + left_start, left_size, 
-                               src + right_start, right_size, 
-                               dst + left_start);
+                    // Use CACHED merge - keeps data in L3 for next merge pass
+                    merge_arrays_cached(src + left_start, left_size, 
+                                        src + right_start, right_size, 
+                                        dst + left_start);
                 }
             }
         } else {
-            // SINGLE PAIR: Use parallel merge - only case where it helps
+            // SINGLE PAIR: Use parallel merge - all threads collaborate on one large merge
+            // Streaming stores are OK here since this is the final pass before Phase 2
             size_t left_size = (width <= chunk_size) ? width : chunk_size;
             size_t right_start = left_size;
             
@@ -489,12 +504,22 @@ static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
     for (; i + 64 <= chunk_size; i += 64) {
         sort_64_simd(arr + i);
     }
-    if (i + 32 <= chunk_size) {
-        sort_32_simd(arr + i);
-        i += 32;
-    }
-    if (i < chunk_size) {
-        insertion_sort(arr + i, chunk_size - i);
+    
+    // Handle remainder - must produce a SINGLE sorted run
+    size_t remainder_size = chunk_size - i;
+    if (remainder_size > 0) {
+        if (remainder_size >= 32 && remainder_size < 64) {
+            sort_32_simd(arr + i);
+            if (remainder_size > 32) {
+                insertion_sort(arr + i + 32, remainder_size - 32);
+                // Merge the two portions
+                uint32_t temp_remainder[64] __attribute__((aligned(64)));
+                merge_arrays_unaligned(arr + i, 32, arr + i + 32, remainder_size - 32, temp_remainder);
+                memcpy(arr + i, temp_remainder, remainder_size * sizeof(uint32_t));
+            }
+        } else {
+            insertion_sort(arr + i, remainder_size);
+        }
     }
     
     // Step 2: All merge passes within this chunk
@@ -749,5 +774,4 @@ int main(int argc, char *argv[]) {
     free(arr);
     return 0;
 }
-
        
