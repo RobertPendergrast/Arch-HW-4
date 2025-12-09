@@ -40,7 +40,10 @@ DIST_NAMES = {
 
 def read_results(csv_file='benchmark_results.csv'):
     """Read benchmark results from CSV file."""
+    # For summary: {distribution: {algorithm_name: time}} (1B elements only)
+    # For SIMD uniform: {size: time}
     results = defaultdict(dict)  # {distribution: {algorithm_name: time}}
+    simd_uniform_data = {}  # {size: time}
     
     if not os.path.exists(csv_file):
         print(f"Error: {csv_file} not found!")
@@ -51,15 +54,25 @@ def read_results(csv_file='benchmark_results.csv'):
         reader = csv.DictReader(f)
         for row in reader:
             dist = row['distribution']
+            size = int(row['size'])
             algo_name = row['algorithm_name']
             status = row.get('status', 'OK')
             
-            if status == 'OK' and row['time_seconds']:
-                results[dist][algo_name] = float(row['time_seconds'])
-            else:
-                results[dist][algo_name] = None  # Failed test
+            # Store 1B element results for summary
+            if size == 1000000000:
+                if status == 'OK' and row['time_seconds']:
+                    results[dist][algo_name] = float(row['time_seconds'])
+                else:
+                    results[dist][algo_name] = None  # Failed test
+            
+            # Store all SIMD uniform data
+            if dist == 'uniform' and algo_name == 'SIMD':
+                if status == 'OK' and row['time_seconds']:
+                    simd_uniform_data[size] = float(row['time_seconds'])
+                else:
+                    simd_uniform_data[size] = None
     
-    return results
+    return results, simd_uniform_data
 
 
 def plot_single_distribution(dist, times, output_file):
@@ -123,7 +136,7 @@ def plot_single_distribution(dist, times, output_file):
 
 def plot_combined_summary(results, output_file='benchmark_summary.png'):
     """Create a combined summary plot with all distributions."""
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(12, 10))  # More boxy aspect ratio
     
     distributions = list(results.keys())
     n_dist = len(distributions)
@@ -147,21 +160,22 @@ def plot_combined_summary(results, output_file='benchmark_summary.png'):
         offset = (i - n_algo/2 + 0.5) * bar_width
         bars = ax.bar(x + offset, times, bar_width, 
                      label=algo, color=COLORS[algo], alpha=0.85,
-                     edgecolor='black', linewidth=0.5)
+                     edgecolor='black', linewidth=1.0)
     
-    # Customize axes
-    ax.set_xlabel('Data Distribution', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Time (seconds)', fontsize=12, fontweight='bold')
+    # Customize axes with larger fonts
+    ax.set_xlabel('Data Distribution', fontsize=24, fontweight='bold')
+    ax.set_ylabel('Time (seconds)', fontsize=24, fontweight='bold')
     ax.set_xticks(x)
     ax.set_xticklabels([DIST_NAMES.get(d, d.title()) for d in distributions], 
-                       fontsize=10, rotation=15, ha='right')
+                       fontsize=20, rotation=15, ha='right')
+    ax.tick_params(axis='y', labelsize=20)
     
-    # Title
-    ax.set_title('Merge Sort Performance Comparison\n(1 Billion Elements, Multiple Distributions)',
-                fontsize=14, fontweight='bold', pad=15)
+    # Title with larger font
+    ax.set_title('Merge Sort Performance Comparison\n(1 Billion Elements, Multiple Data Distributions)',
+                fontsize=26, fontweight='bold', pad=20)
     
-    # Legend
-    ax.legend(loc='upper right', framealpha=0.9)
+    # Legend with larger font
+    ax.legend(loc='upper right', framealpha=0.9, fontsize=18)
     
     # Grid
     ax.grid(True, alpha=0.3, linestyle='--', axis='y')
@@ -169,6 +183,68 @@ def plot_combined_summary(results, output_file='benchmark_summary.png'):
     
     # Set y-axis to start at 0
     ax.set_ylim(bottom=0)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"  Saved: {output_file}")
+    plt.close()
+
+
+def plot_simd_uniform(simd_data, output_file='benchmark_simd_uniform.png'):
+    """Create a bar chart showing SIMD performance on uniform distribution at different sizes."""
+    fig, ax = plt.subplots(figsize=(12, 10))  # More boxy aspect ratio
+    
+    # Get all sizes and sort them
+    sizes = sorted([s for s in simd_data.keys() if simd_data[s] is not None])
+    
+    if not sizes:
+        print("No SIMD uniform data to plot!")
+        return
+    
+    # Get times for each size
+    times = [simd_data[s] for s in sizes]
+    
+    # Format size labels
+    size_labels = []
+    for s in sizes:
+        if s >= 1000000000:
+            size_labels.append(f'{s/1000000000:.0f}B')
+        elif s >= 1000000:
+            size_labels.append(f'{s/1000000:.0f}M')
+        elif s >= 1000:
+            size_labels.append(f'{s/1000:.0f}K')
+        else:
+            size_labels.append(str(s))
+    
+    x = np.arange(len(sizes))
+    bars = ax.bar(x, times, color=COLORS['SIMD'], alpha=0.85, 
+                  edgecolor='black', linewidth=1.0)
+    
+    # Add value labels on bars
+    for bar, time in zip(bars, times):
+        if time > 0:
+            label = f'{time:.3f}s' if time < 1 else f'{time:.2f}s'
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                   label, ha='center', va='bottom', 
+                   fontsize=14, fontweight='bold')
+    
+    # Customize axes with larger fonts
+    ax.set_xlabel('Input Size', fontsize=18, fontweight='bold')
+    ax.set_ylabel('Time (seconds)', fontsize=18, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(size_labels, fontsize=16)
+    ax.tick_params(axis='y', labelsize=16)
+    
+    # Set y-axis to log scale
+    ax.set_yscale('log')
+    
+    # Title with larger font
+    ax.set_title('SIMD Merge Sort Performance\n(Uniform Random Distribution)',
+                fontsize=20, fontweight='bold', pad=20)
+    
+    # Grid
+    ax.grid(True, alpha=0.3, linestyle='--', which='both')
+    ax.set_axisbelow(True)
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -283,7 +359,7 @@ def main():
     csv_file = sys.argv[1] if len(sys.argv) > 1 else 'benchmark_results.csv'
     
     print(f"\nReading results from {csv_file}...")
-    results = read_results(csv_file)
+    results, simd_uniform_data = read_results(csv_file)
     
     if not results:
         print("No benchmark results found!")
@@ -294,17 +370,14 @@ def main():
     # Print summary table
     print_summary_table(results)
     
-    # Generate individual distribution plots
+    # Generate only the two requested plots
     print("\nGenerating plots...")
-    for dist in results:
-        output_file = f'benchmark_{dist}.png'
-        plot_single_distribution(dist, results[dist], output_file)
     
     # Generate combined summary plot
     plot_combined_summary(results, 'benchmark_summary.png')
     
-    # Generate speedup chart
-    plot_speedup_chart(results, 'benchmark_speedup.png')
+    # Generate SIMD uniform plot
+    plot_simd_uniform(simd_uniform_data, 'benchmark_simd_uniform.png')
     
     print("\nDone!")
     return 0
