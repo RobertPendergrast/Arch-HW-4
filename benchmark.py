@@ -264,7 +264,9 @@ def main():
     )
     parser.add_argument(
         "executable",
-        help="Name of the sorting executable (e.g., sort_radix, sort_simd)"
+        nargs="?",
+        default="./sort_simd_main",
+        help="Sorting executable to benchmark (default: ./sort_simd_main)"
     )
     parser.add_argument(
         "--dist", "-d",

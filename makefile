@@ -11,8 +11,11 @@ merge.o: merge.c merge.h
 sorting: sorting.c utils.o
 	$(CC) $(CFLAGS) sorting.c utils.o -o sorting $(LDFLAGS)
 
-sort_simd: sort_simd.c utils.o merge.o
-	$(CC) $(CFLAGS) -fopenmp sort_simd.c utils.o merge.o -o sort_simd $(LDFLAGS)
+sort_simd_main: sort_simd.o sort_simd_main.o utils.o merge.o
+	$(CC) $(CFLAGS) -fopenmp sort_simd_main.o sort_simd.o utils.o merge.o -o sort_simd_main $(LDFLAGS)
+
+sort_simd: sort_simd_main
+	ln -sf sort_simd_main sort_simd
 
 sort_simd_kv: sort_simd_kv.c utils.o merge.o
 	$(CC) $(CFLAGS) -fopenmp sort_simd_kv.c utils.o merge.o -o sort_simd_kv $(LDFLAGS)
@@ -66,7 +69,7 @@ membw_test: membw_test.c
 	$(CC) $(CFLAGS) -fopenmp membw_test.c -o membw_test $(LDFLAGS)
 
 clean:
-	rm -f utils.o merge.o stable_sort_avx512.o sorting merge threaded_devide improved_split multi_sort test_stable_sort sort_simd sort_simd_kv sort_fast_stable test_merge test_sort_network bench_stable_sort sort_radix sort_radix_kv membw_test
+	rm -f utils.o merge.o stable_sort_avx512.o sorting merge threaded_devide improved_split multi_sort test_stable_sort sort_simd sort_simd_main.o sort_simd_main sort_simd_kv sort_fast_stable test_merge test_sort_network bench_stable_sort sort_radix sort_radix_kv membw_test
 
 github:
 	-git commit -a
