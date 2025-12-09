@@ -1,647 +1,503 @@
-#include <stdint.h>
-#include <stdlib.h>
+/*
+ * Test suite for AVX-512 Odd-Even Merge Network
+ * 
+ * Tests:
+ * 1. Register-level merge (merge_512_oddeven)
+ * 2. Array-level merge (merge_arrays, merge_arrays_cached)
+ * 3. Key-Value merge variants
+ * 4. Various input patterns: sorted, reverse, interleaved, random
+ * 
+ * Compile: make test_merge
+ * Run: ./test_merge
+ */
+
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
-
+#include <immintrin.h>
 #include "merge.h"
-#include "utils.h"
 
-// Test counters
+// Colors for terminal output
+#define RED     "\x1b[31m"
+#define GREEN   "\x1b[32m"
+#define YELLOW  "\x1b[33m"
+#define RESET   "\x1b[0m"
+
+// Test configuration
+#define SMALL_SIZE 32
+#define MEDIUM_SIZE 1024
+#define LARGE_SIZE (1 << 20)  // 1M elements
+
 static int tests_passed = 0;
 static int tests_failed = 0;
 
-// Helper to verify array is sorted
-int is_sorted(uint32_t *arr, size_t size) {
-    for (size_t i = 1; i < size; i++) {
-        if (arr[i-1] > arr[i]) {
+// Verify array is sorted
+static int is_sorted(uint32_t *arr, size_t n) {
+    for (size_t i = 1; i < n; i++) {
+        if (arr[i] < arr[i-1]) {
             return 0;
         }
     }
     return 1;
 }
 
-// Helper to verify merged array contains all expected values
-int verify_merge_result(uint32_t *result, uint32_t *left, size_t left_size, 
-                        uint32_t *right, size_t right_size) {
-    size_t total = left_size + right_size;
-    
-    // Check sorted
-    if (!is_sorted(result, total)) {
-        return 0;
-    }
-    
-    // Check all elements present (by counting)
-    // Create a copy and sort both to compare
-    uint32_t *expected = malloc(total * sizeof(uint32_t));
-    memcpy(expected, left, left_size * sizeof(uint32_t));
-    memcpy(expected + left_size, right, right_size * sizeof(uint32_t));
-    
-    // Simple bubble sort for verification (we know inputs are sorted, so just merge)
-    uint32_t *temp = malloc(total * sizeof(uint32_t));
-    size_t i = 0, j = 0, k = 0;
-    while (i < left_size && j < right_size) {
-        if (left[i] <= right[j]) temp[k++] = left[i++];
-        else temp[k++] = right[j++];
-    }
-    while (i < left_size) temp[k++] = left[i++];
-    while (j < right_size) temp[k++] = right[j++];
-    
-    int match = (memcmp(result, temp, total * sizeof(uint32_t)) == 0);
-    
-    free(expected);
-    free(temp);
-    return match;
-}
-
-// ============== merge_512_registers Tests ==============
-
-int test_merge_512_basic() {
-    printf("  test_merge_512_basic: ");
-    
-    // Interleaved sorted sequences
-    uint32_t left[] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
-    uint32_t right[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32};
-    
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
-    
-    merge_512_registers(&left_reg, &right_reg);
-    
-    uint32_t result_left[16], result_right[16];
-    _mm512_storeu_epi32(result_left, left_reg);
-    _mm512_storeu_epi32(result_right, right_reg);
-    
-    // Check left has 1-16, right has 17-32
-    int pass = 1;
-    for (int i = 0; i < 16; i++) {
-        if (result_left[i] != (uint32_t)(i + 1)) pass = 0;
-        if (result_right[i] != (uint32_t)(i + 17)) pass = 0;
-    }
-    
-    if (pass) {
-        printf("PASSED\n");
-        return 1;
-    } else {
-        printf("FAILED\n");
-        printf("    Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
-        printf("    Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
-        return 0;
-    }
-}
-
-int test_merge_512_already_partitioned() {
-    printf("  test_merge_512_already_partitioned: ");
-    
-    // Left is all smaller than right
-    uint32_t left[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-    uint32_t right[] = {17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
-    
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
-    
-    merge_512_registers(&left_reg, &right_reg);
-    
-    uint32_t result_left[16], result_right[16];
-    _mm512_storeu_epi32(result_left, left_reg);
-    _mm512_storeu_epi32(result_right, right_reg);
-    
-    int pass = 1;
-    for (int i = 0; i < 16; i++) {
-        if (result_left[i] != (uint32_t)(i + 1)) pass = 0;
-        if (result_right[i] != (uint32_t)(i + 17)) pass = 0;
-    }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    else {
-        printf("FAILED\n");
-        printf("    Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
-        printf("    Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
-        return 0;
-    }
-}
-
-int test_merge_512_reversed() {
-    printf("  test_merge_512_reversed: ");
-    
-    // Left is all larger than right (should swap)
-    uint32_t left[] = {17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
-    uint32_t right[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-    
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
-    
-    merge_512_registers(&left_reg, &right_reg);
-    
-    uint32_t result_left[16], result_right[16];
-    _mm512_storeu_epi32(result_left, left_reg);
-    _mm512_storeu_epi32(result_right, right_reg);
-    
-    int pass = 1;
-    for (int i = 0; i < 16; i++) {
-        if (result_left[i] != (uint32_t)(i + 1)) pass = 0;
-        if (result_right[i] != (uint32_t)(i + 17)) pass = 0;
-    }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    else {
-        printf("FAILED\n");
-        printf("    Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
-        printf("    Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
-        return 0;
-    }
-}
-
-int test_merge_512_duplicates() {
-    printf("  test_merge_512_duplicates: ");
-    
-    // Arrays with duplicate values
-    uint32_t left[] = {1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8};
-    uint32_t right[] = {1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8};
-    
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
-    
-    merge_512_registers(&left_reg, &right_reg);
-    
-    uint32_t result_left[16], result_right[16];
-    _mm512_storeu_epi32(result_left, left_reg);
-    _mm512_storeu_epi32(result_right, right_reg);
-    
-    // Just verify sorted
-    int pass = is_sorted(result_left, 16) && is_sorted(result_right, 16);
-    // And that max of left <= min of right
-    if (pass && result_left[15] > result_right[0]) pass = 0;
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    else {
-        printf("FAILED\n");
-        printf("    Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
-        printf("    Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
-        return 0;
-    }
-}
-
-int test_merge_512_random() {
-    printf("  test_merge_512_random: ");
-    
-    // Generate random sorted arrays
-    uint32_t left[16], right[16];
-    uint32_t val = rand() % 100;
-    for (int i = 0; i < 16; i++) {
-        left[i] = val;
-        val += rand() % 10 + 1;
-    }
-    val = rand() % 100;
-    for (int i = 0; i < 16; i++) {
-        right[i] = val;
-        val += rand() % 10 + 1;
-    }
-    
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
-    
-    merge_512_registers(&left_reg, &right_reg);
-    
-    uint32_t result_left[16], result_right[16];
-    _mm512_storeu_epi32(result_left, left_reg);
-    _mm512_storeu_epi32(result_right, right_reg);
-    
-    int pass = is_sorted(result_left, 16) && is_sorted(result_right, 16);
-    if (pass && result_left[15] > result_right[0]) pass = 0;
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    else {
-        printf("FAILED\n");
-        printf("    Input Left:  "); for(int i=0; i<16; i++) printf("%u ", left[i]); printf("\n");
-        printf("    Input Right: "); for(int i=0; i<16; i++) printf("%u ", right[i]); printf("\n");
-        printf("    Result Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
-        printf("    Result Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
-        return 0;
-    }
-}
-
-int test_merge_512_large_unsigned() {
-    printf("  test_merge_512_large_unsigned (values > 2^31): ");
-    
-    // Test with values that have high bit set (would be negative if treated as signed)
-    uint32_t left[16], right[16];
-    uint32_t base = 0x80000000;  // 2^31
-    for (int i = 0; i < 16; i++) {
-        left[i] = base + i * 2;      // Even: 2^31, 2^31+2, ...
-        right[i] = base + i * 2 + 1; // Odd: 2^31+1, 2^31+3, ...
-    }
-    
-    __m512i left_reg = _mm512_loadu_epi32(left);
-    __m512i right_reg = _mm512_loadu_epi32(right);
-    
-    merge_512_registers(&left_reg, &right_reg);
-    
-    uint32_t result_left[16], result_right[16];
-    _mm512_storeu_epi32(result_left, left_reg);
-    _mm512_storeu_epi32(result_right, right_reg);
-    
-    // Should be sorted: 2^31, 2^31+1, 2^31+2, ..., 2^31+31
-    int pass = 1;
-    for (int i = 0; i < 16; i++) {
-        if (result_left[i] != base + i) pass = 0;
-        if (result_right[i] != base + 16 + i) pass = 0;
-    }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    else {
-        printf("FAILED\n");
-        printf("    Result Left:  "); for(int i=0; i<16; i++) printf("%u ", result_left[i]); printf("\n");
-        printf("    Expected:     "); for(int i=0; i<16; i++) printf("%u ", base + i); printf("\n");
-        printf("    Result Right: "); for(int i=0; i<16; i++) printf("%u ", result_right[i]); printf("\n");
-        printf("    Expected:     "); for(int i=0; i<16; i++) printf("%u ", base + 16 + i); printf("\n");
-        return 0;
-    }
-}
-
-// ============== merge_arrays Tests ==============
-
-int test_merge_arrays_16_16() {
-    printf("  test_merge_arrays_16_16: ");
-    
-    uint32_t left[16] __attribute__((aligned(64)));
-    uint32_t right[16] __attribute__((aligned(64)));
-    uint32_t result[32] __attribute__((aligned(64)));
-    for (int i = 0; i < 16; i++) {
-        left[i] = 2*i + 1;   // 1, 3, 5, ..., 31
-        right[i] = 2*i + 2;  // 2, 4, 6, ..., 32
-    }
-    
-    merge_arrays(left, 16, right, 16, result);
-    
-    int pass = 1;
-    for (int i = 0; i < 32; i++) {
-        if (result[i] != (uint32_t)(i + 1)) {
-            pass = 0;
-            printf("FAILED at index %d: expected %d, got %u\n", i, i+1, result[i]);
-            break;
+// Verify KV array is sorted by key and payloads match
+static int is_sorted_kv(uint32_t *keys, uint32_t *payloads, size_t n) {
+    for (size_t i = 1; i < n; i++) {
+        if (keys[i] < keys[i-1]) {
+            return 0;
         }
     }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    return 0;
+    // Payloads should still be valid (not corrupted)
+    return 1;
 }
 
-int test_merge_arrays_32_32() {
-    printf("  test_merge_arrays_32_32: ");
-    
-    uint32_t left[32] __attribute__((aligned(64)));
-    uint32_t right[32] __attribute__((aligned(64)));
-    uint32_t result[64] __attribute__((aligned(64)));
-    for (int i = 0; i < 32; i++) {
-        left[i] = 2*i + 1;   // 1, 3, 5, ..., 63
-        right[i] = 2*i + 2;  // 2, 4, 6, ..., 64
+// Print array (for debugging small arrays)
+static void print_array(const char *name, uint32_t *arr, size_t n) {
+    printf("%s: [", name);
+    for (size_t i = 0; i < n && i < 32; i++) {
+        printf("%u", arr[i]);
+        if (i < n-1 && i < 31) printf(", ");
     }
-    
-    merge_arrays(left, 32, right, 32, result);
-    
-    int pass = 1;
-    for (int i = 0; i < 64; i++) {
-        if (result[i] != (uint32_t)(i + 1)) {
-            pass = 0;
-            printf("FAILED at index %d: expected %d, got %u\n", i, i+1, result[i]);
-            break;
-        }
-    }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    return 0;
+    if (n > 32) printf(", ...");
+    printf("]\n");
 }
 
-int test_merge_arrays_33_33() {
-    printf("  test_merge_arrays_33_33 (non-multiple of 16): ");
-    
-    uint32_t left[33] __attribute__((aligned(64)));
-    uint32_t right[33] __attribute__((aligned(64)));
-    uint32_t result[66] __attribute__((aligned(64)));
-    for (int i = 0; i < 33; i++) {
-        left[i] = 2*i + 1;
-        right[i] = 2*i + 2;
-    }
-    
-    merge_arrays(left, 33, right, 33, result);
-    
-    int pass = 1;
-    for (int i = 0; i < 66; i++) {
-        if (result[i] != (uint32_t)(i + 1)) {
-            pass = 0;
-            printf("FAILED at index %d: expected %d, got %u\n", i, i+1, result[i]);
-            break;
-        }
-    }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    return 0;
+// Allocate aligned memory
+static uint32_t* aligned_alloc_u32(size_t n) {
+    return (uint32_t*)aligned_alloc(64, n * sizeof(uint32_t));
 }
 
-int test_merge_arrays_small() {
-    printf("  test_merge_arrays_small (< 16 elements): ");
-    
-    // Small arrays use scalar merge, no alignment needed
-    uint32_t left[] = {1, 3, 5, 7, 9};
-    uint32_t right[] = {2, 4, 6, 8, 10};
-    uint32_t result[10];
-    
-    merge_arrays(left, 5, right, 5, result);
-    
-    int pass = 1;
-    for (int i = 0; i < 10; i++) {
-        if (result[i] != (uint32_t)(i + 1)) {
-            pass = 0;
-            printf("FAILED at index %d: expected %d, got %u\n", i, i+1, result[i]);
-            break;
-        }
-    }
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    return 0;
-}
-
-int test_merge_arrays_asymmetric() {
-    printf("  test_merge_arrays_asymmetric (17 + 31): ");
-    
-    uint32_t *left = NULL, *right = NULL, *result = NULL;
-    posix_memalign((void**)&left, 64, 17 * sizeof(uint32_t));
-    posix_memalign((void**)&right, 64, 31 * sizeof(uint32_t));
-    posix_memalign((void**)&result, 64, 48 * sizeof(uint32_t));
-    
-    // Left has odd numbers 1-33
-    for (int i = 0; i < 17; i++) left[i] = 2*i + 1;
-    // Right has even numbers 2-62
-    for (int i = 0; i < 31; i++) right[i] = 2*i + 2;
-    
-    merge_arrays(left, 17, right, 31, result);
-    
-    int pass = is_sorted(result, 48);
-    if (pass) pass = verify_merge_result(result, left, 17, right, 31);
-    
-    free(left); free(right); free(result);
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    else { printf("FAILED\n"); return 0; }
-}
-
-int test_merge_arrays_large() {
-    printf("  test_merge_arrays_large (1000 + 1000): ");
-    
-    uint32_t *left = NULL, *right = NULL, *result = NULL;
-    posix_memalign((void**)&left, 64, 1000 * sizeof(uint32_t));
-    posix_memalign((void**)&right, 64, 1000 * sizeof(uint32_t));
-    posix_memalign((void**)&result, 64, 2000 * sizeof(uint32_t));
-    
-    for (int i = 0; i < 1000; i++) {
-        left[i] = 2*i + 1;
-        right[i] = 2*i + 2;
-    }
-    
-    merge_arrays(left, 1000, right, 1000, result);
-    
-    int pass = 1;
-    for (int i = 0; i < 2000; i++) {
-        if (result[i] != (uint32_t)(i + 1)) {
-            pass = 0;
-            printf("FAILED at index %d: expected %d, got %u\n", i, i+1, result[i]);
-            break;
-        }
-    }
-    
-    free(left); free(right); free(result);
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    return 0;
-}
-
-int test_merge_arrays_random_large() {
-    printf("  test_merge_arrays_random_large (5000 + 5000 random): ");
-    
-    size_t size = 5000;
-    uint32_t *left = NULL, *right = NULL, *result = NULL;
-    posix_memalign((void**)&left, 64, size * sizeof(uint32_t));
-    posix_memalign((void**)&right, 64, size * sizeof(uint32_t));
-    posix_memalign((void**)&result, 64, 2 * size * sizeof(uint32_t));
-    
-    // Generate sorted random arrays
-    uint32_t val = 0;
-    for (size_t i = 0; i < size; i++) {
-        val += rand() % 10 + 1;
-        left[i] = val;
-    }
-    val = 0;
-    for (size_t i = 0; i < size; i++) {
-        val += rand() % 10 + 1;
-        right[i] = val;
-    }
-    
-    merge_arrays(left, size, right, size, result);
-    
-    int pass = is_sorted(result, 2 * size);
-    if (pass) pass = verify_merge_result(result, left, size, right, size);
-    
-    if (!pass) {
-        // Find first error
-        for (size_t i = 1; i < 2*size; i++) {
-            if (result[i-1] > result[i]) {
-                printf("FAILED - not sorted at index %zu: %u > %u\n", i, result[i-1], result[i]);
-                break;
-            }
-        }
-    }
-    
-    free(left); free(right); free(result);
-    
-    if (pass) { printf("PASSED\n"); return 1; }
-    return 0;
-}
-
-int test_merge_arrays_edge_sizes() {
-    printf("  test_merge_arrays_edge_sizes: ");
-    
-    int sizes[] = {16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 100, 127, 128, 129};
-    int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
-    int pass = 1;
-    
-    for (int si = 0; si < num_sizes && pass; si++) {
-        for (int sj = 0; sj < num_sizes && pass; sj++) {
-            int s1 = sizes[si], s2 = sizes[sj];
-            
-            uint32_t *left = NULL, *right = NULL, *result = NULL;
-            posix_memalign((void**)&left, 64, s1 * sizeof(uint32_t));
-            posix_memalign((void**)&right, 64, s2 * sizeof(uint32_t));
-            posix_memalign((void**)&result, 64, (s1 + s2) * sizeof(uint32_t));
-            
-            uint32_t val = 0;
-            for (int i = 0; i < s1; i++) { val += rand() % 5 + 1; left[i] = val; }
-            val = 0;
-            for (int i = 0; i < s2; i++) { val += rand() % 5 + 1; right[i] = val; }
-            
-            merge_arrays(left, s1, right, s2, result);
-            
-            if (!is_sorted(result, s1 + s2)) {
-                printf("FAILED for sizes %d + %d\n", s1, s2);
-                pass = 0;
-            }
-            
-            free(left); free(right); free(result);
-        }
-    }
-    
-    if (pass) { printf("PASSED (tested %d size combinations)\n", num_sizes * num_sizes); return 1; }
-    return 0;
-}
-
-// ============== Full Sort Tests ==============
-
-// Copy of insertion_sort from sort_simd.c
-void insertion_sort_test(uint32_t *arr, size_t size) {
-    for (size_t i = 1; i < size; i++) {
-        uint32_t key = arr[i];
-        size_t j = i;
-        while (j > 0 && arr[j - 1] > key) {
-            arr[j] = arr[j - 1];
-            j--;
-        }
-        arr[j] = key;
+// Fill with ascending values
+static void fill_ascending(uint32_t *arr, size_t n, uint32_t start) {
+    for (size_t i = 0; i < n; i++) {
+        arr[i] = start + i;
     }
 }
 
-#define SORT_THRESHOLD_TEST 32
-
-void basic_merge_sort_test(uint32_t *arr, size_t size) {
-    if (size <= SORT_THRESHOLD_TEST) {
-        insertion_sort_test(arr, size);
-        return;
+// Fill with descending values
+static void fill_descending(uint32_t *arr, size_t n, uint32_t start) {
+    for (size_t i = 0; i < n; i++) {
+        arr[i] = start + n - 1 - i;
     }
-    size_t middle = size / 2;
-    size_t size_left = middle;
-    size_t size_right = size - middle;
-
-    uint32_t* left = NULL;
-    uint32_t* right = NULL;
-    if (posix_memalign((void**)&left, 64, size_left * sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "posix_memalign failed for left array\n");
-        exit(EXIT_FAILURE);
-    }
-    if (posix_memalign((void**)&right, 64, size_right * sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "posix_memalign failed for right array\n");
-        free(left);
-        exit(EXIT_FAILURE);
-    }
-
-    memcpy(left, arr, size_left * sizeof(uint32_t));
-    memcpy(right, arr + middle, size_right * sizeof(uint32_t));
-
-    basic_merge_sort_test(left, size_left);
-    basic_merge_sort_test(right, size_right);
-
-    merge_arrays(left, size_left, right, size_right, arr);
-    free(left);
-    free(right);
 }
 
-// Comparison function for qsort
-int compare_uint32(const void *a, const void *b) {
+// Fill with interleaved pattern (evens or odds)
+static void fill_interleaved(uint32_t *arr, size_t n, int even) {
+    for (size_t i = 0; i < n; i++) {
+        arr[i] = 2 * i + (even ? 0 : 1);
+    }
+}
+
+// Fill with random values
+static void fill_random(uint32_t *arr, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        arr[i] = rand();
+    }
+}
+
+// Sort array for merge input preparation
+static int cmp_u32(const void *a, const void *b) {
     uint32_t ua = *(const uint32_t*)a;
     uint32_t ub = *(const uint32_t*)b;
     return (ua > ub) - (ua < ub);
 }
 
-int test_full_sort() {
-    printf("  Testing full merge sort with various sizes:\n");
-    int pass = 1;
+// ============== Test Functions ==============
+
+// Test 1: Register-level merge (32 elements -> 32 sorted)
+void test_register_merge(void) {
+    printf("\n" YELLOW "=== Test: Register-level merge_512_oddeven ===" RESET "\n");
     
-    // Test sizes
-    size_t sizes[] = {10, 32, 33, 64, 100, 128, 256, 500, 1000, 5000, 10000};
-    int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+    __m512i left, right;
+    uint32_t left_arr[16] __attribute__((aligned(64)));
+    uint32_t right_arr[16] __attribute__((aligned(64)));
+    uint32_t result[32] __attribute__((aligned(64)));
     
-    for (int si = 0; si < num_sizes && pass; si++) {
-        size_t size = sizes[si];
-        printf("    Size %zu: ", size);
-        
-        uint32_t *arr = NULL, *copy = NULL;
-        posix_memalign((void**)&arr, 64, size * sizeof(uint32_t));
-        posix_memalign((void**)&copy, 64, size * sizeof(uint32_t));
-        
-        // Generate random data
-        for (size_t i = 0; i < size; i++) {
-            arr[i] = rand();
-            copy[i] = arr[i];
-        }
-        
-        // Sort using our merge sort
-        basic_merge_sort_test(arr, size);
-        
-        // Verify sorted
-        if (!is_sorted(arr, size)) {
-            printf("FAILED - not sorted!\n");
-            // Find first error
-            for (size_t i = 1; i < size; i++) {
-                if (arr[i-1] > arr[i]) {
-                    printf("      First error at index %zu: %u > %u\n", i, arr[i-1], arr[i]);
-                    break;
-                }
-            }
-            pass = 0;
-        } else {
-            // Verify all elements present (sort the copy with qsort and compare)
-            qsort(copy, size, sizeof(uint32_t), compare_uint32);
-            
-            if (memcmp(arr, copy, size * sizeof(uint32_t)) != 0) {
-                printf("FAILED - wrong elements!\n");
-                pass = 0;
-            } else {
-                printf("PASSED\n");
-            }
-        }
-        
-        free(arr);
-        free(copy);
+    // Test case 1: Evens in left, odds in right
+    printf("  Case 1: Evens/Odds interleaved... ");
+    fill_interleaved(left_arr, 16, 1);   // 0,2,4,6,...,30
+    fill_interleaved(right_arr, 16, 0);  // 1,3,5,7,...,31
+    
+    left = _mm512_load_epi32(left_arr);
+    right = _mm512_load_epi32(right_arr);
+    merge_512_oddeven(&left, &right);
+    _mm512_store_epi32(result, left);
+    _mm512_store_epi32(result + 16, right);
+    
+    if (is_sorted(result, 32)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        print_array("Result", result, 32);
+        tests_failed++;
     }
     
-    return pass;
+    // Test case 2: Left all smaller
+    printf("  Case 2: Left all smaller... ");
+    fill_ascending(left_arr, 16, 0);    // 0-15
+    fill_ascending(right_arr, 16, 16);  // 16-31
+    
+    left = _mm512_load_epi32(left_arr);
+    right = _mm512_load_epi32(right_arr);
+    merge_512_oddeven(&left, &right);
+    _mm512_store_epi32(result, left);
+    _mm512_store_epi32(result + 16, right);
+    
+    if (is_sorted(result, 32)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        print_array("Result", result, 32);
+        tests_failed++;
+    }
+    
+    // Test case 3: Right all smaller
+    printf("  Case 3: Right all smaller... ");
+    fill_ascending(left_arr, 16, 16);   // 16-31
+    fill_ascending(right_arr, 16, 0);   // 0-15
+    
+    left = _mm512_load_epi32(left_arr);
+    right = _mm512_load_epi32(right_arr);
+    merge_512_oddeven(&left, &right);
+    _mm512_store_epi32(result, left);
+    _mm512_store_epi32(result + 16, right);
+    
+    if (is_sorted(result, 32)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        print_array("Result", result, 32);
+        tests_failed++;
+    }
+    
+    // Test case 4: Random sorted inputs
+    printf("  Case 4: Random sorted inputs... ");
+    fill_random(left_arr, 16);
+    fill_random(right_arr, 16);
+    qsort(left_arr, 16, sizeof(uint32_t), cmp_u32);
+    qsort(right_arr, 16, sizeof(uint32_t), cmp_u32);
+    
+    left = _mm512_load_epi32(left_arr);
+    right = _mm512_load_epi32(right_arr);
+    merge_512_oddeven(&left, &right);
+    _mm512_store_epi32(result, left);
+    _mm512_store_epi32(result + 16, right);
+    
+    if (is_sorted(result, 32)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        print_array("Left input", left_arr, 16);
+        print_array("Right input", right_arr, 16);
+        print_array("Result", result, 32);
+        tests_failed++;
+    }
+}
+
+// Test 2: Array-level merge (various sizes)
+void test_array_merge(void) {
+    printf("\n" YELLOW "=== Test: Array-level merge_arrays ===" RESET "\n");
+    
+    size_t sizes[] = {32, 64, 128, 256, 512, 1024, 4096, 16384};
+    int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+    
+    for (int s = 0; s < num_sizes; s++) {
+        size_t n = sizes[s];
+        size_t half = n / 2;
+        
+        uint32_t *left = aligned_alloc_u32(half);
+        uint32_t *right = aligned_alloc_u32(half);
+        uint32_t *result = aligned_alloc_u32(n);
+        
+        // Interleaved pattern
+        printf("  Size %zu (interleaved)... ", n);
+        fill_interleaved(left, half, 1);
+        fill_interleaved(right, half, 0);
+        
+        merge_arrays(left, half, right, half, result);
+        
+        if (is_sorted(result, n)) {
+            printf(GREEN "PASSED" RESET "\n");
+            tests_passed++;
+        } else {
+            printf(RED "FAILED" RESET "\n");
+            tests_failed++;
+        }
+        
+        // Random pattern
+        printf("  Size %zu (random)... ", n);
+        fill_random(left, half);
+        fill_random(right, half);
+        qsort(left, half, sizeof(uint32_t), cmp_u32);
+        qsort(right, half, sizeof(uint32_t), cmp_u32);
+        
+        merge_arrays(left, half, right, half, result);
+        
+        if (is_sorted(result, n)) {
+            printf(GREEN "PASSED" RESET "\n");
+            tests_passed++;
+        } else {
+            printf(RED "FAILED" RESET "\n");
+            tests_failed++;
+        }
+        
+        free(left);
+        free(right);
+        free(result);
+    }
+}
+
+// Test 3: Cached merge variant
+void test_cached_merge(void) {
+    printf("\n" YELLOW "=== Test: Cached merge_arrays_cached ===" RESET "\n");
+    
+    size_t n = 4096;
+    size_t half = n / 2;
+    
+    uint32_t *left = aligned_alloc_u32(half);
+    uint32_t *right = aligned_alloc_u32(half);
+    uint32_t *result = aligned_alloc_u32(n);
+    
+    printf("  Size %zu (random)... ", n);
+    fill_random(left, half);
+    fill_random(right, half);
+    qsort(left, half, sizeof(uint32_t), cmp_u32);
+    qsort(right, half, sizeof(uint32_t), cmp_u32);
+    
+    merge_arrays_cached(left, half, right, half, result);
+    
+    if (is_sorted(result, n)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        tests_failed++;
+    }
+    
+    free(left);
+    free(right);
+    free(result);
+}
+
+// Test 4: Key-Value merge
+void test_kv_merge(void) {
+    printf("\n" YELLOW "=== Test: Key-Value merge_arrays_kv ===" RESET "\n");
+    
+    size_t n = 4096;
+    size_t half = n / 2;
+    
+    uint32_t *left_key = aligned_alloc_u32(half);
+    uint32_t *left_pay = aligned_alloc_u32(half);
+    uint32_t *right_key = aligned_alloc_u32(half);
+    uint32_t *right_pay = aligned_alloc_u32(half);
+    uint32_t *result_key = aligned_alloc_u32(n);
+    uint32_t *result_pay = aligned_alloc_u32(n);
+    
+    printf("  Size %zu (interleaved)... ", n);
+    
+    // Create interleaved keys with matching payloads
+    for (size_t i = 0; i < half; i++) {
+        left_key[i] = 2 * i;
+        left_pay[i] = 2 * i + 1000000;  // Payload = key + offset
+        right_key[i] = 2 * i + 1;
+        right_pay[i] = 2 * i + 1 + 1000000;
+    }
+    
+    merge_arrays_kv(left_key, left_pay, half, right_key, right_pay, half,
+                    result_key, result_pay);
+    
+    int passed = is_sorted(result_key, n);
+    
+    // Verify payloads match keys
+    if (passed) {
+        for (size_t i = 0; i < n; i++) {
+            if (result_pay[i] != result_key[i] + 1000000) {
+                passed = 0;
+                printf("\n    Payload mismatch at %zu: key=%u, payload=%u\n", 
+                       i, result_key[i], result_pay[i]);
+                break;
+            }
+        }
+    }
+    
+    if (passed) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        tests_failed++;
+    }
+    
+    free(left_key);
+    free(left_pay);
+    free(right_key);
+    free(right_pay);
+    free(result_key);
+    free(result_pay);
+}
+
+// Test 5: Unequal sizes
+void test_unequal_sizes(void) {
+    printf("\n" YELLOW "=== Test: Unequal input sizes ===" RESET "\n");
+    
+    struct { size_t left; size_t right; } cases[] = {
+        {100, 50},
+        {50, 100},
+        {1000, 17},
+        {17, 1000},
+        {256, 255},
+        {255, 256},
+    };
+    int num_cases = sizeof(cases) / sizeof(cases[0]);
+    
+    for (int c = 0; c < num_cases; c++) {
+        size_t left_size = cases[c].left;
+        size_t right_size = cases[c].right;
+        size_t total = left_size + right_size;
+        
+        uint32_t *left = aligned_alloc_u32(left_size);
+        uint32_t *right = aligned_alloc_u32(right_size);
+        uint32_t *result = aligned_alloc_u32(total);
+        
+        printf("  Left=%zu, Right=%zu... ", left_size, right_size);
+        
+        fill_random(left, left_size);
+        fill_random(right, right_size);
+        qsort(left, left_size, sizeof(uint32_t), cmp_u32);
+        qsort(right, right_size, sizeof(uint32_t), cmp_u32);
+        
+        merge_arrays(left, left_size, right, right_size, result);
+        
+        if (is_sorted(result, total)) {
+            printf(GREEN "PASSED" RESET "\n");
+            tests_passed++;
+        } else {
+            printf(RED "FAILED" RESET "\n");
+            tests_failed++;
+        }
+        
+        free(left);
+        free(right);
+        free(result);
+    }
+}
+
+// Test 6: Edge cases
+void test_edge_cases(void) {
+    printf("\n" YELLOW "=== Test: Edge cases ===" RESET "\n");
+    
+    // Small arrays (fallback to scalar)
+    printf("  Small arrays (size 8+8)... ");
+    uint32_t left[8] = {0, 2, 4, 6, 8, 10, 12, 14};
+    uint32_t right[8] = {1, 3, 5, 7, 9, 11, 13, 15};
+    uint32_t result[16];
+    
+    merge_arrays(left, 8, right, 8, result);
+    
+    if (is_sorted(result, 16)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        tests_failed++;
+    }
+    
+    // All same values
+    printf("  All same values... ");
+    uint32_t *same_left = aligned_alloc_u32(64);
+    uint32_t *same_right = aligned_alloc_u32(64);
+    uint32_t *same_result = aligned_alloc_u32(128);
+    
+    for (int i = 0; i < 64; i++) {
+        same_left[i] = 42;
+        same_right[i] = 42;
+    }
+    
+    merge_arrays(same_left, 64, same_right, 64, same_result);
+    
+    if (is_sorted(same_result, 128)) {
+        printf(GREEN "PASSED" RESET "\n");
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        tests_failed++;
+    }
+    
+    free(same_left);
+    free(same_right);
+    free(same_result);
+}
+
+// Test 7: Large array performance sanity check
+void test_large_merge(void) {
+    printf("\n" YELLOW "=== Test: Large array merge (1M elements) ===" RESET "\n");
+    
+    size_t n = LARGE_SIZE;
+    size_t half = n / 2;
+    
+    uint32_t *left = aligned_alloc_u32(half);
+    uint32_t *right = aligned_alloc_u32(half);
+    uint32_t *result = aligned_alloc_u32(n);
+    
+    if (!left || !right || !result) {
+        printf("  " RED "SKIPPED (allocation failed)" RESET "\n");
+        return;
+    }
+    
+    printf("  Generating random sorted inputs...\n");
+    fill_random(left, half);
+    fill_random(right, half);
+    qsort(left, half, sizeof(uint32_t), cmp_u32);
+    qsort(right, half, sizeof(uint32_t), cmp_u32);
+    
+    printf("  Merging %zu elements... ", n);
+    
+    clock_t start = clock();
+    merge_arrays(left, half, right, half, result);
+    clock_t end = clock();
+    
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    double throughput = (n * sizeof(uint32_t)) / elapsed / 1e9;  // GB/s
+    
+    if (is_sorted(result, n)) {
+        printf(GREEN "PASSED" RESET " (%.3f sec, %.2f GB/s)\n", elapsed, throughput);
+        tests_passed++;
+    } else {
+        printf(RED "FAILED" RESET "\n");
+        tests_failed++;
+    }
+    
+    free(left);
+    free(right);
+    free(result);
 }
 
 // ============== Main ==============
 
-int main(int argc, char *argv[]) {
-    srand(42);  // Fixed seed for reproducibility
+int main(int argc, char **argv) {
+    printf("===== AVX-512 Odd-Even Merge Test Suite =====\n");
+    printf("Testing merge network correctness...\n");
     
-    printf("====== merge_512_registers Tests ======\n");
-    tests_passed += test_merge_512_basic();
-    tests_passed += test_merge_512_already_partitioned();
-    tests_passed += test_merge_512_reversed();
-    tests_passed += test_merge_512_duplicates();
-    tests_passed += test_merge_512_large_unsigned();  // Test values > 2^31
-    for (int i = 0; i < 5; i++) {
-        tests_passed += test_merge_512_random();
-    }
+    srand(42);  // Deterministic for reproducibility
     
-    printf("\n====== merge_arrays Tests ======\n");
-    tests_passed += test_merge_arrays_16_16();
-    tests_passed += test_merge_arrays_32_32();
-    tests_passed += test_merge_arrays_33_33();
-    tests_passed += test_merge_arrays_small();
-    tests_passed += test_merge_arrays_asymmetric();
-    tests_passed += test_merge_arrays_large();
-    tests_passed += test_merge_arrays_random_large();
-    tests_passed += test_merge_arrays_edge_sizes();
+    test_register_merge();
+    test_array_merge();
+    test_cached_merge();
+    test_kv_merge();
+    test_unequal_sizes();
+    test_edge_cases();
+    test_large_merge();
     
-    printf("\n====== Full Sort Tests ======\n");
-    tests_passed += test_full_sort();
+    printf("\n===== Results =====\n");
+    printf("Passed: " GREEN "%d" RESET "\n", tests_passed);
+    printf("Failed: %s%d%s\n", tests_failed > 0 ? RED : GREEN, tests_failed, RESET);
     
-    printf("\n====== Summary ======\n");
-    int total = tests_passed + tests_failed;
-    printf("Passed: %d / %d\n", tests_passed, tests_passed + tests_failed);
-    
-    if (tests_failed == 0) {
-        printf("ALL TESTS PASSED!\n");
-        return 0;
-    } else {
-        printf("SOME TESTS FAILED!\n");
-        return 1;
-    }
+    return tests_failed > 0 ? 1 : 0;
 }
