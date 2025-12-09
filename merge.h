@@ -20,6 +20,7 @@ extern const int IDX_SWAP4[16];
 // Odd-even merge shuffle indices
 extern const int IDX_OE_SWAP8[16];
 extern const int IDX_OE_SWAP4[16];
+extern const int IDX_OE_REV4[16];
 extern const int IDX_OE_SWAP2[16];
 
 // ============== Function declarations ==============
