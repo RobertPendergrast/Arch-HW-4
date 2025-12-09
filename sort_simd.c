@@ -460,9 +460,8 @@ static void reset_chunk_timings(void) {
 static void print_chunk_timings(size_t chunk_size, size_t num_chunks) {
     if (!chunk_timing_enabled) return;
     
-    // Calculate actual subchunk size used
-    size_t num_subchunks = (chunk_size + SUBCHUNK_ELEMENTS - 1) / SUBCHUNK_ELEMENTS;
-    if (num_subchunks > (size_t)NUM_THREADS) num_subchunks = NUM_THREADS;
+    // Calculate actual subchunk size used (must match sort_chunk_parallel)
+    size_t num_subchunks = NUM_THREADS;
     size_t subchunk_size = (chunk_size + num_subchunks - 1) / num_subchunks;
     subchunk_size = ((subchunk_size + 63) / 64) * 64;
     
@@ -482,10 +481,6 @@ static void print_chunk_timings(size_t chunk_size, size_t num_chunks) {
     
     chunk_timing_enabled = 0;
 }
-
-// Size of subchunk each thread handles independently (no OpenMP overhead within)
-// 512K elements = 2MB = fits comfortably in L2/L3 per core
-#define SUBCHUNK_ELEMENTS (512 * 1024)
 
 // Single-threaded sort for a subchunk - NO OpenMP calls inside
 // This is the hot path that each thread runs independently
@@ -559,9 +554,8 @@ static void sort_subchunk(uint32_t *arr, size_t size, uint32_t *temp) {
 static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
     double t0, t1;
     
-    // Calculate subchunk sizes
-    size_t num_subchunks = (chunk_size + SUBCHUNK_ELEMENTS - 1) / SUBCHUNK_ELEMENTS;
-    if (num_subchunks > (size_t)NUM_THREADS) num_subchunks = NUM_THREADS;
+    // Calculate subchunk sizes - ALWAYS use NUM_THREADS subchunks to keep all threads busy
+    size_t num_subchunks = NUM_THREADS;
     size_t subchunk_size = (chunk_size + num_subchunks - 1) / num_subchunks;
     // Round to 64-element boundary for SIMD alignment
     subchunk_size = ((subchunk_size + 63) / 64) * 64;
@@ -726,8 +720,8 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
         sort_chunk_parallel(arr + start, chunk_size, temp + start);
     }
     t_end = get_time_sec();
-    printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
-           num_chunks, t_end - t_start, NUM_THREADS);
+    printf("  [Phase 1] Sort %zu L3 chunks (%zuK elements each): %.3f sec (%d threads, cache-focused)\n", 
+           num_chunks, L3_CHUNK_ELEMENTS / 1024, t_end - t_start, NUM_THREADS);
     print_chunk_timings(L3_CHUNK_ELEMENTS, num_chunks);  // Print breakdown
     
     // ========== Phase 2: Merge L3-sized chunks together ==========
