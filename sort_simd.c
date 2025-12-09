@@ -395,6 +395,39 @@ static void parallel_merge(
     }
 }
 
+/*
+ * Parallel merge using a specified number of threads.
+ * Used when we have fewer pairs than threads and want to parallelize each pair.
+ * NOTE: Must be called from within an existing parallel region!
+ */
+static void parallel_merge_n_impl(
+    uint32_t *left, size_t left_size,
+    uint32_t *right, size_t right_size,
+    uint32_t *out,
+    int nthreads
+) {
+    // Calculate depth from thread count
+    int depth = 0;
+    for (int t = nthreads; t > 1; t /= 2) depth++;
+    
+    if (depth == 0) {
+        // Single thread - just do sequential merge
+        int left_aligned = ((uintptr_t)left % 64) == 0;
+        int right_aligned = ((uintptr_t)right % 64) == 0;
+        if (left_aligned && right_aligned) {
+            merge_arrays_cached(left, left_size, right, right_size, out);
+        } else {
+            merge_arrays_unaligned(left, left_size, right, right_size, out);
+        }
+    } else {
+        // Use task-based parallelism
+        #pragma omp taskgroup
+        {
+            parallel_merge_impl(left, left_size, right, right_size, out, depth);
+        }
+    }
+}
+
 // Helper for timing
 static inline double get_time_sec() {
     struct timespec ts;
@@ -482,13 +515,37 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
     uint32_t *src = arr;
     uint32_t *dst = temp;
     
+    // Minimum merge size before parallelization is worthwhile (amortize OpenMP overhead)
+    // 512 elements = 2KB per merge side = 4KB total working set (fits in L1)
+    const size_t MIN_PARALLEL_WIDTH = 512;
+    
     int level = 0;
     for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2, level++) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
         t0 = get_time_sec();
-        if (num_pairs > 1) {
-            // MULTIPLE PAIRS: Use parallel for - each thread handles one or more merges
+        if (width < MIN_PARALLEL_WIDTH) {
+            // TINY MERGES: Sequential loop - OpenMP overhead would dominate
+            // Each thread does its own portion without synchronization
+            #pragma omp parallel for schedule(static)
+            for (size_t p = 0; p < num_pairs; p++) {
+                size_t left_start = p * 2 * width;
+                if (left_start >= chunk_size) continue;
+                
+                size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
+                size_t right_start = left_start + left_size;
+                
+                if (right_start >= chunk_size) {
+                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                } else {
+                    size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
+                    merge_arrays_cached(src + left_start, left_size,
+                                        src + right_start, right_size,
+                                        dst + left_start);
+                }
+            }
+        } else if (num_pairs >= (size_t)NUM_THREADS) {
+            // MANY PAIRS: Use parallel for - each thread handles one or more merges
             // This is better than parallel merge because merge is memory-bound
             // and multiple independent merges can saturate memory bandwidth better
             #pragma omp parallel for schedule(dynamic, 1)
@@ -507,6 +564,34 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                     merge_arrays_cached(src + left_start, left_size, 
                                         src + right_start, right_size, 
                                         dst + left_start);
+                }
+            }
+        } else if (num_pairs > 1) {
+            // FEW PAIRS (< NUM_THREADS): Use parallel merge on each pair
+            // Assign multiple threads per pair to avoid idle threads
+            int threads_per_pair = NUM_THREADS / (int)num_pairs;
+            
+            #pragma omp parallel
+            {
+                #pragma omp single
+                {
+                    for (size_t p = 0; p < num_pairs; p++) {
+                        #pragma omp task
+                        {
+                            size_t left_start = p * 2 * width;
+                            size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
+                            size_t right_start = left_start + left_size;
+                            
+                            if (right_start >= chunk_size) {
+                                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+                            } else {
+                                size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
+                                parallel_merge_n_impl(src + left_start, left_size,
+                                                      src + right_start, right_size,
+                                                      dst + left_start, threads_per_pair);
+                            }
+                        }
+                    }
                 }
             }
         } else {
