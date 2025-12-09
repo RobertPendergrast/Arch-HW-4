@@ -404,13 +404,51 @@ static inline double get_time_sec() {
 
 
 
+// Timing accumulators for sort_chunk_parallel benchmarking
+#define MAX_MERGE_LEVELS 20
+static double chunk_base_sort_time = 0.0;
+static double chunk_merge_times[MAX_MERGE_LEVELS] = {0};
+static double chunk_copyback_time = 0.0;
+static int chunk_timing_enabled = 0;
+
+static void reset_chunk_timings(void) {
+    chunk_base_sort_time = 0.0;
+    for (int i = 0; i < MAX_MERGE_LEVELS; i++) {
+        chunk_merge_times[i] = 0.0;
+    }
+    chunk_copyback_time = 0.0;
+    chunk_timing_enabled = 1;
+}
+
+static void print_chunk_timings(size_t chunk_size, size_t num_chunks) {
+    if (!chunk_timing_enabled) return;
+    
+    printf("\n  [Phase 1 Breakdown] Per-level timing (accumulated over %zu chunks):\n", num_chunks);
+    printf("    Base sort (64-elem blocks): %.3f sec\n", chunk_base_sort_time);
+    
+    size_t width = SORT_THRESHOLD;
+    for (int level = 0; level < MAX_MERGE_LEVELS && width < chunk_size; level++, width *= 2) {
+        size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
+        double bytes = (double)chunk_size * sizeof(uint32_t) * num_chunks;
+        double gbps = bytes / chunk_merge_times[level] / 1e9;
+        printf("    Merge width %8zu: %.3f sec (%zu pairs/chunk, %.2f GB/s)\n", 
+               width, chunk_merge_times[level], num_pairs, gbps);
+    }
+    printf("    Copy back:              %.3f sec\n", chunk_copyback_time);
+    
+    chunk_timing_enabled = 0;
+}
+
 // Sort a single chunk with ALL threads collaborating (cache-friendly)
 // All threads work on the SAME chunk, keeping data hot in L3 cache
 static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
+    double t0, t1;
+    
     // Step 1: Base case sort (64-element chunks) - PARALLEL within chunk
     size_t num_64_blocks = chunk_size / 64;
     size_t remainder_start = num_64_blocks * 64;
     
+    t0 = get_time_sec();
     #pragma omp parallel for schedule(static)
     for (size_t b = 0; b < num_64_blocks; b++) {
         sort_64_simd(arr + b * 64);
@@ -437,14 +475,18 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
             insertion_sort(arr + remainder_start, remainder_size);
         }
     }
+    t1 = get_time_sec();
+    if (chunk_timing_enabled) chunk_base_sort_time += (t1 - t0);
     
     // Step 2: Merge passes within this chunk
     uint32_t *src = arr;
     uint32_t *dst = temp;
     
-    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
+    int level = 0;
+    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2, level++) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
+        t0 = get_time_sec();
         if (num_pairs > 1) {
             // MULTIPLE PAIRS: Use parallel for - each thread handles one or more merges
             // This is better than parallel merge because merge is memory-bound
@@ -480,6 +522,8 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 memcpy(dst, src, chunk_size * sizeof(uint32_t));
             }
         }
+        t1 = get_time_sec();
+        if (chunk_timing_enabled && level < MAX_MERGE_LEVELS) chunk_merge_times[level] += (t1 - t0);
         
         // Swap src and dst
         uint32_t *swap = src;
@@ -489,81 +533,39 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
     
     // Copy result back to arr if needed - PARALLEL copy
     if (src != arr) {
+        t0 = get_time_sec();
         #pragma omp parallel for schedule(static)
         for (size_t i = 0; i < chunk_size; i += 4096) {
             size_t copy_size = (i + 4096 <= chunk_size) ? 4096 : (chunk_size - i);
             memcpy(arr + i, src + i, copy_size * sizeof(uint32_t));
         }
+        t1 = get_time_sec();
+        if (chunk_timing_enabled) chunk_copyback_time += (t1 - t0);
     }
 }
 
-// Original single-threaded version (for comparison or fallback)
-static void sort_chunk(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
-    // Step 1: Base case sort (64-element chunks)
-    size_t i = 0;
-    for (; i + 64 <= chunk_size; i += 64) {
-        sort_64_simd(arr + i);
-    }
-    
-    // Handle remainder - must produce a SINGLE sorted run
-    size_t remainder_size = chunk_size - i;
-    if (remainder_size > 0) {
-        if (remainder_size >= 32 && remainder_size < 64) {
-            sort_32_simd(arr + i);
-            if (remainder_size > 32) {
-                insertion_sort(arr + i + 32, remainder_size - 32);
-                // Merge the two portions
-                uint32_t temp_remainder[64] __attribute__((aligned(64)));
-                merge_arrays_unaligned(arr + i, 32, arr + i + 32, remainder_size - 32, temp_remainder);
-                memcpy(arr + i, temp_remainder, remainder_size * sizeof(uint32_t));
-            }
-        } else {
-            insertion_sort(arr + i, remainder_size);
-        }
-    }
-    
-    // Step 2: All merge passes within this chunk
-    uint32_t *src = arr;
-    uint32_t *dst = temp;
-    
-    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2) {
-        size_t j = 0;
-        while (j < chunk_size) {
-            size_t left_start = j;
-            size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
-            size_t right_start = left_start + left_size;
-            size_t right_size = 0;
-            
-            if (right_start < chunk_size) {
-                right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-            }
-            
-            if (right_size == 0) {
-                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
-            } else {
-                merge_arrays(src + left_start, left_size, 
-                           src + right_start, right_size, 
-                           dst + left_start);
-            }
-            
-            j = right_start + right_size;
-        }
-        
-        // Swap src and dst
-        uint32_t *swap = src;
-        src = dst;
-        dst = swap;
-    }
-    
-    // Copy result back to arr if needed
-    if (src != arr) {
-        memcpy(arr, src, chunk_size * sizeof(uint32_t));
-    }
-}
+
+
+// Threshold for single-threaded fast path (avoids OpenMP overhead for small arrays)
+// 64K elements = 256KB, fits comfortably in L2 cache
+#define SMALL_ARRAY_THRESHOLD (64 * 1024)
 
 // Bottom-up merge sort with L3 cache blocking and OpenMP parallelization
 void basic_merge_sort(uint32_t *arr, size_t size) {
     if (size <= 1) return;
+    
+    // ========== Fast path for small arrays ==========
+    // Skip all the OpenMP overhead - single-threaded is faster for small data
+    if (size <= SMALL_ARRAY_THRESHOLD) {
+        uint32_t *temp = NULL;
+        if (posix_memalign((void**)&temp, 64, size * sizeof(uint32_t)) != 0) {
+            fprintf(stderr, "posix_memalign failed for temp buffer\n");
+            exit(EXIT_FAILURE);
+        }
+        sort_chunk(arr, size, temp);
+        free(temp);
+        return;
+    }
     
     double t_start, t_end;
     
@@ -592,6 +594,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     t_start = get_time_sec();
     size_t num_chunks = (size + L3_CHUNK_ELEMENTS - 1) / L3_CHUNK_ELEMENTS;
     
+    reset_chunk_timings();  // Enable per-level timing
     for (size_t c = 0; c < num_chunks; c++) {
         size_t start = c * L3_CHUNK_ELEMENTS;
         size_t chunk_size = (start + L3_CHUNK_ELEMENTS <= size) ? L3_CHUNK_ELEMENTS : (size - start);
@@ -601,6 +604,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
     t_end = get_time_sec();
     printf("  [Phase 1] Sort %zu L3 chunks (8M elements each): %.3f sec (%d threads, cache-focused)\n", 
            num_chunks, t_end - t_start, NUM_THREADS);
+    print_chunk_timings(L3_CHUNK_ELEMENTS, num_chunks);  // Print breakdown
     
     // ========== Phase 2: Merge L3-sized chunks together ==========
     // Only continue while we can use all threads for separate merges
