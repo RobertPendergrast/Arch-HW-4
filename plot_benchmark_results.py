@@ -172,7 +172,7 @@ def plot_combined_summary(results, output_file='benchmark_summary.png'):
     
     # Title with larger font
     ax.set_title('Merge Sort Performance Comparison\n(1 Billion Elements, Multiple Data Distributions)',
-                fontsize=26, fontweight='bold', pad=20)
+                fontsize=25, fontweight='bold', pad=20)
     
     # Legend with larger font
     ax.legend(loc='upper right', framealpha=0.9, fontsize=18)
@@ -228,19 +228,19 @@ def plot_simd_uniform(simd_data, output_file='benchmark_simd_uniform.png'):
                    label, ha='center', va='bottom', 
                    fontsize=14, fontweight='bold')
     
-    # Customize axes with larger fonts
-    ax.set_xlabel('Input Size', fontsize=18, fontweight='bold')
-    ax.set_ylabel('Time (seconds)', fontsize=18, fontweight='bold')
+    # Customize axes with larger fonts (matching summary plot)
+    ax.set_xlabel('Input Size', fontsize=24, fontweight='bold')
+    ax.set_ylabel('Time (seconds)', fontsize=24, fontweight='bold')
     ax.set_xticks(x)
-    ax.set_xticklabels(size_labels, fontsize=16)
-    ax.tick_params(axis='y', labelsize=16)
+    ax.set_xticklabels(size_labels, fontsize=20)
+    ax.tick_params(axis='y', labelsize=20)
     
     # Set y-axis to log scale
     ax.set_yscale('log')
     
-    # Title with larger font
+    # Title with larger font (one size smaller than summary)
     ax.set_title('SIMD Merge Sort Performance\n(Uniform Random Distribution)',
-                fontsize=20, fontweight='bold', pad=20)
+                fontsize=25, fontweight='bold', pad=20)
     
     # Grid
     ax.grid(True, alpha=0.3, linestyle='--', which='both')
