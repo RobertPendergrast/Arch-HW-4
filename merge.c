@@ -23,47 +23,6 @@ const int _128_SHUFFLE_3 = _128_SHUFFLE_1;;
 const int _128_SHUFFLE_3_L = 0b11011000;
 const int _128_SHUFFLE_3_H = 0b01110010;
 
-/*
- * Takes in two m128i registers and merges them in place.
- * NOTE: Uses unsigned comparison (epu32) for correct uint32_t sorting!
- */
-void merge_128_registers(
-    __m128i *left,
-    __m128i *right
-) {
-    // Level 1 - Get min/max values (unsigned comparison)
-    __m128i L1 = _mm_min_epu32(*left, *right);
-    __m128i H1 = _mm_max_epu32(*left, *right);
-
-    // Shuffle
-    __m128i L1p = _mm_blend_epi32(L1, H1, _128_BLEND_1);
-    __m128i H1p = _mm_blend_epi32(H1, L1, _128_BLEND_1);
-    H1p = _mm_shuffle_epi32(H1p, _128_SHUFFLE_1);
-
-    // Level 2 - Get min/max values (unsigned comparison)
-    __m128i L2 = _mm_min_epu32(L1p, H1p);
-    __m128i H2 = _mm_max_epu32(L1p, H1p);
-
-    // Shuffle
-    __m128i L2p = _mm_blend_epi32(L2, H2, _128_BLEND_2);
-    __m128i H2p = _mm_blend_epi32(H2, L2, _128_BLEND_2);
-    H2p = _mm_shuffle_epi32(H2p, _128_SHUFFLE_2);
-
-    // Level 3 - Get min/max values (unsigned comparison)
-    __m128i L3 = _mm_min_epu32(L2p, H2p);
-    __m128i H3 = _mm_max_epu32(L2p, H2p);
-
-    //Shuffle
-    __m128i H3p =  _mm_shuffle_epi32(H3, _128_SHUFFLE_3);
-    __m128i L3p =  _mm_blend_epi32(L3, H3p, _128_BLEND_3);
-    H3p = _mm_blend_epi32(H3p, L3, _128_BLEND_3);
-    H3p = _mm_shuffle_epi32(H3p, _128_SHUFFLE_3_H);
-    L3p = _mm_shuffle_epi32(L3p, _128_SHUFFLE_3_L);
-
-    // Output
-    *left = L3p;
-    *right = H3p;
-}
 
 
 // 512 Constants - blend masks for each level of bitonic merge

@@ -22,18 +22,21 @@ DEFAULT_DISTRIBUTIONS = [
     "same",
 ]
 
-DEFAULT_SIZES = [1_000_000]
+DEFAULT_SIZES = [1_000_000, 5_000_000, 10_000_000, 20_000_000]
 
 CSV_HEADERS = [
     "distribution",
     "size",
     "elements",
     "total_time",
+    "wall_time",
     "computed_throughput_gbps",
     "equal_pairs",
     "stability_violations",
     "violation_ratio",
     "stability_pct",
+    "data_file_mb",
+    "return_code",
     "success",
     "error",
 ]
@@ -101,7 +104,11 @@ def parse_sort_output(stdout: str) -> dict:
     return metrics
 
 
-def run_sort(executable: str, data_path: Path, timeout: int) -> tuple[subprocess.CompletedProcess | None, float, str | None]:
+def run_sort(executable: str, data_path: Path, timeout: int) -> tuple[
+    subprocess.CompletedProcess | None,
+    float,
+    str | None,
+]:
     """Run `sort_simd_kv` and return the process result, wall time and error message."""
     TMP_OUTPUT.unlink(missing_ok=True)
     cmd = [executable, str(data_path), str(TMP_OUTPUT)]
@@ -190,11 +197,14 @@ def main() -> int:
                         "size": size,
                         "elements": size,
                         "total_time": None,
+                        "wall_time": None,
                         "computed_throughput_gbps": None,
                         "equal_pairs": None,
                         "stability_violations": None,
                         "violation_ratio": None,
                         "stability_pct": None,
+                        "data_file_mb": None,
+                        "return_code": None,
                         "success": False,
                         "error": gen_error,
                     }
@@ -210,11 +220,14 @@ def main() -> int:
                         "size": size,
                         "elements": size,
                         "total_time": None,
+                        "wall_time": wall_time,
                         "computed_throughput_gbps": None,
                         "equal_pairs": None,
                         "stability_violations": None,
                         "violation_ratio": None,
                         "stability_pct": None,
+                        "data_file_mb": data_path.stat().st_size / (1024 * 1024),
+                        "return_code": None,
                         "success": False,
                         "error": exec_error,
                     }
@@ -251,11 +264,14 @@ def main() -> int:
                 "size": size,
                 "elements": size,
                 "total_time": total_time,
+                "wall_time": wall_time,
                 "computed_throughput_gbps": throughput,
                 "equal_pairs": equal_pairs,
                 "stability_violations": violations,
                 "violation_ratio": violation_ratio,
                 "stability_pct": metrics["stability_pct"],
+                "data_file_mb": data_path.stat().st_size / (1024 * 1024),
+                "return_code": result.returncode,
                 "success": success,
                 "error": err_msg,
             }
@@ -273,7 +289,11 @@ def main() -> int:
                 if violations is not None
                 else "violations=n/a"
             )
-            print(f"  [✓] {status} | {stability_text}")
+
+            data_mb = data_path.stat().st_size / (1024 * 1024)
+            print(
+                f"  [✓] {status} | wall={wall_time:.3f}s | file={data_mb:.1f}MB | {stability_text}"
+            )
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="") as handle:
