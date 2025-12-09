@@ -8,6 +8,12 @@ utils.o: utils.c utils.h
 merge.o: merge.c merge.h
 	$(CC) $(CFLAGS) -c merge.c -o merge.o
 
+sort_simd.o: sort_simd.c sort_simd.h merge.h utils.h
+	$(CC) $(CFLAGS) -fopenmp -c sort_simd.c -o sort_simd.o
+
+sort_simd_main.o: sort_simd_main.c sort_simd.h utils.h
+	$(CC) $(CFLAGS) -fopenmp -c sort_simd_main.c -o sort_simd_main.o
+
 sorting: sorting.c utils.o
 	$(CC) $(CFLAGS) sorting.c utils.o -o sorting $(LDFLAGS)
 
