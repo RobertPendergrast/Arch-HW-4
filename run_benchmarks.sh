@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run multi_sort benchmarks for different thread counts and generate graph
+# Run sort_no_simd benchmarks for different thread counts and generate graph
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <input_file>"
@@ -16,21 +16,21 @@ rm -f multi_sort_results.csv
 THREADS=(1 2 4 8 16)
 
 echo "=========================================="
-echo "Running Multi-Sort Benchmarks"
+echo "Running Sort No-SIMD Benchmarks"
 echo "Input file: $INPUT_FILE"
 echo "Thread counts: ${THREADS[@]}"
 echo "=========================================="
 echo ""
 
 # Build if needed
-make multi_sort
+make sort_no_simd
 
 # Run benchmarks
 for threads in "${THREADS[@]}"; do
     echo "----------------------------------------"
     echo "Testing with $threads thread(s)..."
     echo "----------------------------------------"
-    ./multi_sort "$INPUT_FILE" "$threads"
+    ./sort_no_simd "$INPUT_FILE" "$threads"
     echo ""
 done
 

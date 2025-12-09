@@ -29,8 +29,11 @@ improved_split: improved_split.c utils.o
 multi_sort: multi_sort.c utils.o
 	$(CC) $(CFLAGS_OPT) multi_sort.c utils.o -o multi_sort $(LDFLAGS)
 
+sort_no_simd: sort_no_simd.c utils.o
+	$(CC) $(CFLAGS) -fopenmp sort_no_simd.c utils.o -o sort_no_simd $(LDFLAGS)
+
 clean:
-	rm -f utils.o merge.o sorting merge threaded_devide improved_split multi_sort
+	rm -f utils.o merge.o sorting merge threaded_devide improved_split multi_sort sort_no_simd
 
 github:
 	-git commit -a
