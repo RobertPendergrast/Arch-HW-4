@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -O3 -mavx512f -mavx512bw -march=native -funroll-loops -ffast-math
+CFLAGS = -Wall -O3 -mavx512f -mavx512bw -march=native -funroll-loops -ffast-math -fopenmp
 LDFLAGS = -pthread
 
 utils.o: utils.c utils.h
