@@ -437,6 +437,10 @@ static inline double get_time_sec() {
 
 
 
+// Size of subchunk each thread handles independently (no OpenMP overhead within)
+// 512K elements = 2MB = fits comfortably in L2/L3 per core
+#define SUBCHUNK_ELEMENTS (512 * 1024)
+
 // Timing accumulators for sort_chunk_parallel benchmarking
 #define MAX_MERGE_LEVELS 20
 static double chunk_base_sort_time = 0.0;
