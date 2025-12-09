@@ -456,14 +456,21 @@ static void reset_chunk_timings(void) {
 static void print_chunk_timings(size_t chunk_size, size_t num_chunks) {
     if (!chunk_timing_enabled) return;
     
-    printf("\n  [Phase 1 Breakdown] Per-level timing (accumulated over %zu chunks):\n", num_chunks);
-    printf("    Base sort (64-elem blocks): %.3f sec\n", chunk_base_sort_time);
+    // Calculate actual subchunk size used
+    size_t num_subchunks = (chunk_size + SUBCHUNK_ELEMENTS - 1) / SUBCHUNK_ELEMENTS;
+    if (num_subchunks > (size_t)NUM_THREADS) num_subchunks = NUM_THREADS;
+    size_t subchunk_size = (chunk_size + num_subchunks - 1) / num_subchunks;
+    subchunk_size = ((subchunk_size + 63) / 64) * 64;
     
-    size_t width = SORT_THRESHOLD;
+    printf("\n  [Phase 1 Breakdown] Per-level timing (accumulated over %zu chunks):\n", num_chunks);
+    printf("    Subchunk sort (%zu × %zuK each): %.3f sec (independent per-thread)\n", 
+           num_subchunks, subchunk_size / 1024, chunk_base_sort_time);
+    
+    size_t width = subchunk_size;
     for (int level = 0; level < MAX_MERGE_LEVELS && width < chunk_size; level++, width *= 2) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         double bytes = (double)chunk_size * sizeof(uint32_t) * num_chunks;
-        double gbps = bytes / chunk_merge_times[level] / 1e9;
+        double gbps = chunk_merge_times[level] > 0 ? bytes / chunk_merge_times[level] / 1e9 : 0;
         printf("    Merge width %8zu: %.3f sec (%zu pairs/chunk, %.2f GB/s)\n", 
                width, chunk_merge_times[level], num_pairs, gbps);
     }
@@ -472,31 +479,30 @@ static void print_chunk_timings(size_t chunk_size, size_t num_chunks) {
     chunk_timing_enabled = 0;
 }
 
-// Sort a single chunk with ALL threads collaborating (cache-friendly)
-// All threads work on the SAME chunk, keeping data hot in L3 cache
-static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
-    double t0, t1;
+// Size of subchunk each thread handles independently (no OpenMP overhead within)
+// 512K elements = 2MB = fits comfortably in L2/L3 per core
+#define SUBCHUNK_ELEMENTS (512 * 1024)
+
+// Single-threaded sort for a subchunk - NO OpenMP calls inside
+// This is the hot path that each thread runs independently
+static void sort_subchunk(uint32_t *arr, size_t size, uint32_t *temp) {
+    if (size <= 1) return;
     
-    // Step 1: Base case sort (64-element chunks) - PARALLEL within chunk
-    size_t num_64_blocks = chunk_size / 64;
+    // Step 1: Base case sort - 64-element blocks with SIMD
+    size_t num_64_blocks = size / 64;
     size_t remainder_start = num_64_blocks * 64;
     
-    t0 = get_time_sec();
-    #pragma omp parallel for schedule(static)
     for (size_t b = 0; b < num_64_blocks; b++) {
         sort_64_simd(arr + b * 64);
     }
     
-    // Handle remainder (single thread, small work)
-    // Must produce a SINGLE sorted run for the merge phase
-    size_t remainder_size = chunk_size - remainder_start;
+    // Handle remainder
+    size_t remainder_size = size - remainder_start;
     if (remainder_size > 0) {
-        if (remainder_size >= 32 && remainder_size < 64) {
-            // Sort first 32 with SIMD, rest with insertion, then merge
+        if (remainder_size >= 32) {
             sort_32_simd(arr + remainder_start);
             if (remainder_size > 32) {
                 insertion_sort(arr + remainder_start + 32, remainder_size - 32);
-                // Merge the two portions in-place using temp buffer
                 uint32_t temp_remainder[64] __attribute__((aligned(64)));
                 merge_arrays_unaligned(arr + remainder_start, 32,
                                        arr + remainder_start + 32, remainder_size - 32,
@@ -504,30 +510,83 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 memcpy(arr + remainder_start, temp_remainder, remainder_size * sizeof(uint32_t));
             }
         } else {
-            // Small remainder - just use insertion sort
             insertion_sort(arr + remainder_start, remainder_size);
         }
+    }
+    
+    // Step 2: Merge passes - completely sequential, no OpenMP
+    uint32_t *src = arr;
+    uint32_t *dst = temp;
+    
+    for (size_t width = SORT_THRESHOLD; width < size; width *= 2) {
+        size_t num_pairs = (size + 2 * width - 1) / (2 * width);
+        
+        for (size_t p = 0; p < num_pairs; p++) {
+            size_t left_start = p * 2 * width;
+            if (left_start >= size) continue;
+            
+            size_t left_size = (left_start + width <= size) ? width : (size - left_start);
+            size_t right_start = left_start + left_size;
+            
+            if (right_start >= size) {
+                memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
+            } else {
+                size_t right_size = (right_start + width <= size) ? width : (size - right_start);
+                merge_arrays_cached(src + left_start, left_size,
+                                    src + right_start, right_size,
+                                    dst + left_start);
+            }
+        }
+        
+        // Swap src and dst
+        uint32_t *swap = src;
+        src = dst;
+        dst = swap;
+    }
+    
+    // Copy back if needed
+    if (src != arr) {
+        memcpy(arr, src, size * sizeof(uint32_t));
+    }
+}
+
+// Sort a single L3 chunk by dividing into thread-local subchunks
+// Each thread independently sorts ~512K elements, then we merge
+static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp) {
+    double t0, t1;
+    
+    // Calculate subchunk sizes
+    size_t num_subchunks = (chunk_size + SUBCHUNK_ELEMENTS - 1) / SUBCHUNK_ELEMENTS;
+    if (num_subchunks > (size_t)NUM_THREADS) num_subchunks = NUM_THREADS;
+    size_t subchunk_size = (chunk_size + num_subchunks - 1) / num_subchunks;
+    // Round to 64-element boundary for SIMD alignment
+    subchunk_size = ((subchunk_size + 63) / 64) * 64;
+    
+    // Step 1: Each thread sorts its own subchunk independently (NO OpenMP overhead within)
+    t0 = get_time_sec();
+    #pragma omp parallel for schedule(static)
+    for (size_t s = 0; s < num_subchunks; s++) {
+        size_t start = s * subchunk_size;
+        if (start >= chunk_size) continue;
+        size_t this_size = (start + subchunk_size <= chunk_size) ? subchunk_size : (chunk_size - start);
+        sort_subchunk(arr + start, this_size, temp + start);
     }
     t1 = get_time_sec();
     if (chunk_timing_enabled) chunk_base_sort_time += (t1 - t0);
     
-    // Step 2: Merge passes within this chunk
+    // Step 2: Merge the sorted subchunks together
+    // Start from subchunk_size width and go up
     uint32_t *src = arr;
     uint32_t *dst = temp;
     
-    // Minimum merge size before parallelization is worthwhile (amortize OpenMP overhead)
-    // 512 elements = 2KB per merge side = 4KB total working set (fits in L1)
-    const size_t MIN_PARALLEL_WIDTH = 512;
-    
     int level = 0;
-    for (size_t width = SORT_THRESHOLD; width < chunk_size; width *= 2, level++) {
+    for (size_t width = subchunk_size; width < chunk_size; width *= 2, level++) {
         size_t num_pairs = (chunk_size + 2 * width - 1) / (2 * width);
         
         t0 = get_time_sec();
-        if (width < MIN_PARALLEL_WIDTH) {
-            // TINY MERGES: Sequential loop - OpenMP overhead would dominate
-            // Each thread does its own portion without synchronization
-            #pragma omp parallel for schedule(static)
+        if (num_pairs >= (size_t)NUM_THREADS) {
+            // Many pairs - one thread per merge
+            #pragma omp parallel for schedule(dynamic, 1)
             for (size_t p = 0; p < num_pairs; p++) {
                 size_t left_start = p * 2 * width;
                 if (left_start >= chunk_size) continue;
@@ -544,31 +603,8 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                                         dst + left_start);
                 }
             }
-        } else if (num_pairs >= (size_t)NUM_THREADS) {
-            // MANY PAIRS: Use parallel for - each thread handles one or more merges
-            // This is better than parallel merge because merge is memory-bound
-            // and multiple independent merges can saturate memory bandwidth better
-            #pragma omp parallel for schedule(dynamic, 1)
-            for (size_t p = 0; p < num_pairs; p++) {
-                size_t left_start = p * 2 * width;
-                if (left_start >= chunk_size) continue;
-                
-                size_t left_size = (left_start + width <= chunk_size) ? width : (chunk_size - left_start);
-                size_t right_start = left_start + left_size;
-                
-                if (right_start >= chunk_size) {
-                    memcpy(dst + left_start, src + left_start, left_size * sizeof(uint32_t));
-                } else {
-                    size_t right_size = (right_start + width <= chunk_size) ? width : (chunk_size - right_start);
-                    // Use CACHED merge - keeps data in L3 for next merge pass
-                    merge_arrays_cached(src + left_start, left_size, 
-                                        src + right_start, right_size, 
-                                        dst + left_start);
-                }
-            }
         } else if (num_pairs > 1) {
-            // FEW PAIRS (< NUM_THREADS): Use parallel merge on each pair
-            // Assign multiple threads per pair to avoid idle threads
+            // Few pairs - multiple threads per merge
             int threads_per_pair = NUM_THREADS / (int)num_pairs;
             
             #pragma omp parallel
@@ -595,8 +631,7 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
                 }
             }
         } else {
-            // SINGLE PAIR: Use parallel merge - all threads collaborate on one large merge
-            // Streaming stores are OK here since this is the final pass before Phase 2
+            // Single pair - all threads collaborate
             size_t left_size = (width <= chunk_size) ? width : chunk_size;
             size_t right_start = left_size;
             
@@ -616,7 +651,7 @@ static void sort_chunk_parallel(uint32_t *arr, size_t chunk_size, uint32_t *temp
         dst = swap;
     }
     
-    // Copy result back to arr if needed - PARALLEL copy
+    // Copy result back to arr if needed
     if (src != arr) {
         t0 = get_time_sec();
         #pragma omp parallel for schedule(static)
