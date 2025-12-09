@@ -17,6 +17,11 @@ extern const int IDX_SWAP8[16];
 // Swap within groups of 8: [0-3,4-7] -> [4-7,0-3] in each half
 extern const int IDX_SWAP4[16];
 
+// Odd-even merge shuffle indices
+extern const int IDX_OE_SWAP8[16];
+extern const int IDX_OE_SWAP4[16];
+extern const int IDX_OE_SWAP2[16];
+
 // ============== Function declarations ==============
 
 /*
@@ -33,6 +38,15 @@ void merge_128_registers(
  * bitonic merge in place.
 */
 void merge_512_registers(
+    __m512i *left,
+    __m512i *right
+);
+
+/*
+ * ALTERNATIVE: Odd-Even Merge Network (more efficient ~20 ops vs ~35 ops)
+ * Uses interleaved min/max + blend pattern instead of independent register processing.
+ */
+void merge_512_oddeven(
     __m512i *left,
     __m512i *right
 );
