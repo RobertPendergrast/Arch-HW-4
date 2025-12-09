@@ -562,7 +562,7 @@ void basic_merge_sort(uint32_t *arr, size_t size) {
             fprintf(stderr, "posix_memalign failed for temp buffer\n");
             exit(EXIT_FAILURE);
         }
-        sort_chunk(arr, size, temp);
+        sort_chunk_parallel(arr, size, temp);
         free(temp);
         return;
     }
